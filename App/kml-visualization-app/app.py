@@ -3,11 +3,11 @@ from shiny import App, ui, render, reactive
 import os
 
 # KML file path from Databricks Unity Catalog Volume
-KML_FILE_PATH = "/Volumes/telecommunications/ca_cell_coverage/5g_coverage/G2024.kml"
+KML_FILE_PATH = "/Volumes/telecommunications/ca_cell_coverage/5g_coverage/5G2024.kml"
 
 app_ui = ui.page_fluid(
     ui.h2("5G Coverage Visualization"),
-    ui.p("Visualizing coverage data from G2024.kml"),
+    ui.p("Visualizing coverage data from 5G2024.kml"),
     ui.output_ui("map_display"),
     title="5G Coverage Map",
 )
