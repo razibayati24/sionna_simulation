@@ -151,7 +151,6 @@ def server(input, output, session):
     map_html = reactive.Value('<div style="padding: 20px;">Loading map...</div>')
     
     @reactive.effect
-    @reactive.event()
     async def load_kml():
         """Load KML file asynchronously"""
         try:
