@@ -1,4 +1,6 @@
 shiny==1.0.0
+databricks-sdk
+databricks-sql-connector
 folium>=0.14.0
 fastkml>=0.12
 lxml>=4.9.0

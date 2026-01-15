@@ -1,92 +1,96 @@
 import asyncio
 from shiny import App, ui, render, reactive
+from databricks.sdk import config
+from databricks import sql
 import os
 
-# KML file path from Databricks Unity Catalog Volume
-KML_FILE_PATH = "/Volumes/telecommunications/ca_cell_coverage/5g_coverage/5G2024.kml"
+# Defined in `app.yaml`
+assert os.getenv("DATABRICKS_WAREHOUSE_ID"), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml."
+
+# Unity Catalog table containing KML data
+KML_TABLE = "telecommunications.ca_cell_coverage.ca_5g_coverage"
 
 app_ui = ui.page_fluid(
     ui.h2("5G Coverage Visualization"),
-    ui.p("Visualizing coverage data from 5G2024.kml"),
+    ui.p("Visualizing coverage data from telecommunications.ca_cell_coverage.ca_5g_coverage"),
     ui.output_ui("map_display"),
     title="5G Coverage Map",
 )
 
 
-def read_kml_file(file_path: str) -> str:
+def read_kml_from_table(connection, table_name: str) -> str:
     """
-    Reads a KML file from Databricks Volume.
-    Tries multiple methods to access the file since volume paths can vary.
+    Reads KML content from a Unity Catalog table.
+    The table may have KML content in various column formats.
     """
-    import os
-    
-    # Try different path variations
-    paths_to_try = [
-        file_path,  # Original path
-        file_path.replace("/Volumes/", "/Volumes/"),  # Keep as is first
-    ]
-    
-    # Check if running in Databricks environment and try dbutils
     try:
-        from pyspark.dbutils import DBUtils
-        spark = None
-        try:
-            from pyspark.sql import SparkSession
-            spark = SparkSession.builder.getOrCreate()
-        except:
-            pass
-        
-        if spark:
-            dbutils = DBUtils(spark)
-            # Try reading with dbutils
-            try:
-                file_content = dbutils.fs.head(file_path)
-                return file_content.decode('utf-8')
-            except Exception as dbutils_error:
-                print(f"dbutils approach failed: {dbutils_error}")
-                # Try with different path formats
-                try:
-                    # Try without /Volumes prefix
-                    alt_path = file_path.replace("/Volumes/", "/")
-                    file_content = dbutils.fs.head(alt_path)
-                    return file_content.decode('utf-8')
-                except:
-                    pass
-    except ImportError:
-        print("dbutils not available, trying file system access")
+        with connection.cursor() as cursor:
+            # First, try to get the table schema to understand the structure
+            cursor.execute(f"DESCRIBE TABLE {table_name}")
+            schema = cursor.fetchall_arrow()
+            
+            # Get column names
+            column_names = schema['col_name'].to_pylist()
+            print(f"Table columns: {column_names}")
+            
+            # Try to find a column that likely contains KML content
+            # Common column names: kml_content, content, kml, data, body, text
+            kml_column = None
+            for col in ['kml_content', 'content', 'kml', 'data', 'body', 'text', 'xml']:
+                if col in column_names:
+                    kml_column = col
+                    break
+            
+            if kml_column:
+                # If we found a likely column, query it
+                query = f"SELECT {kml_column} FROM {table_name} LIMIT 1"
+            else:
+                # If no obvious column, try to get all columns and concatenate string columns
+                # or just get the first row
+                query = f"SELECT * FROM {table_name} LIMIT 1"
+            
+            print(f"Executing query: {query}")
+            cursor.execute(query)
+            result = cursor.fetchall_arrow()
+            
+            if result.num_rows == 0:
+                raise ValueError(f"Table {table_name} is empty or no rows found")
+            
+            # Convert to pandas for easier manipulation
+            df = result.to_pandas()
+            
+            # If we found a specific KML column, use it
+            if kml_column:
+                kml_content = df[kml_column].iloc[0]
+                if kml_content:
+                    return str(kml_content)
+            
+            # Otherwise, try to find any string column that looks like XML/KML
+            for col in df.columns:
+                value = df[col].iloc[0]
+                if isinstance(value, str) and ('<?xml' in value or '<kml' in value.lower() or '<Document' in value):
+                    return str(value)
+            
+            # If still not found, concatenate all string columns
+            kml_parts = []
+            for col in df.columns:
+                value = df[col].iloc[0]
+                if isinstance(value, str) and len(value) > 100:  # Likely contains substantial data
+                    kml_parts.append(str(value))
+            
+            if kml_parts:
+                return '\n'.join(kml_parts)
+            
+            # Last resort: return the entire row as JSON/string representation
+            raise ValueError(
+                f"Could not find KML content in table {table_name}. "
+                f"Available columns: {column_names}. "
+                f"Please ensure the table contains a column with KML/XML data."
+            )
+            
     except Exception as e:
-        print(f"Error with dbutils: {e}")
-    
-    # Try direct file system access with different path variations
-    for path in paths_to_try:
-        try:
-            if os.path.exists(path):
-                with open(path, 'r', encoding='utf-8') as f:
-                    return f.read()
-        except Exception as e:
-            print(f"Failed to read from {path}: {e}")
-            continue
-    
-    # List directory contents for debugging
-    try:
-        dir_path = os.path.dirname(file_path)
-        if os.path.exists(dir_path):
-            files = os.listdir(dir_path)
-            print(f"Files in directory {dir_path}: {files}")
-    except Exception as e:
-        print(f"Could not list directory: {e}")
-    
-    # Final attempt - try reading as raw bytes then decode
-    try:
-        with open(file_path, 'rb') as f:
-            content = f.read()
-            return content.decode('utf-8')
-    except Exception as e:
-        raise FileNotFoundError(
-            f"Could not read KML file from any attempted path. "
-            f"Tried: {paths_to_try}. "
-            f"Last error: {e}"
-        )
+        print(f"Error reading from table: {e}")
+        raise e
 
 
 def parse_and_visualize_kml(kml_content: str) -> str:
@@ -205,6 +209,9 @@ def parse_and_visualize_kml(kml_content: str) -> str:
         """
 
 
+# Databricks configuration
+cfg = config.Config()
+
 def server(input, output, session):
     # Store KML content in a reactive value
     kml_content = reactive.Value(None)
@@ -213,22 +220,43 @@ def server(input, output, session):
     
     @reactive.effect
     async def load_kml():
-        """Load KML file asynchronously"""
+        """Load KML data from Unity Catalog table asynchronously"""
         try:
-            content = await asyncio.to_thread(read_kml_file, KML_FILE_PATH)
+            # Get the user access token from the session request header
+            user_token = session.http_conn.headers.get('X-Forwarded-Access-Token', None)
+            
+            # Create a connection with the user's access token
+            connection = sql.connect(
+                server_hostname=cfg.host,
+                http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
+                access_token=user_token,
+            )
+            
+            # Read KML content from the table
+            content = await asyncio.to_thread(read_kml_from_table, connection, KML_TABLE)
+            connection.close()
+            
             kml_content.set(content)
             html = await asyncio.to_thread(parse_and_visualize_kml, content)
             map_html.set(html)
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
             error_html = f"""
             <div style="padding: 20px; border: 1px solid #f00; border-radius: 5px; color: #f00;">
-                <h3>Error loading KML file</h3>
-                <p>Path: {KML_FILE_PATH}</p>
-                <p>Error: {str(e)}</p>
-                <p><em>Note: Ensure the file path is correct and accessible from the Databricks environment.</em></p>
+                <h3>Error loading KML data</h3>
+                <p><strong>Table:</strong> {KML_TABLE}</p>
+                <p><strong>Error:</strong> {str(e)}</p>
+                <details>
+                    <summary>Error Details</summary>
+                    <pre style="font-size: 12px; max-height: 300px; overflow: auto;">{error_details}</pre>
+                </details>
+                <p><em>Note: Ensure the table exists and is accessible, and contains a column with KML/XML data.</em></p>
             </div>
             """
             map_html.set(error_html)
+            print(f"Error in load_kml: {e}")
+            print(error_details)
     
     @render.ui
     def map_display():
