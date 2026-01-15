@@ -159,30 +159,21 @@ def server(input, output, session):
             html = await asyncio.to_thread(parse_and_visualize_kml, content)
             map_html.set(html)
         except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
             error_html = f"""
             <div style="padding: 20px; border: 1px solid #f00; border-radius: 5px; color: #f00;">
                 <h3>Error loading KML file</h3>
-                <p><strong>Path:</strong> {KML_FILE_PATH}</p>
-                <p><strong>Error:</strong> {str(e)}</p>
-                <details>
-                    <summary>Error Details</summary>
-                    <pre style="font-size: 12px; max-height: 300px; overflow: auto;">{error_details}</pre>
-                </details>
+                <p>Path: {KML_FILE_PATH}</p>
+                <p>Error: {str(e)}</p>
                 <p><em>Note: Ensure the file path is correct and accessible from the Databricks environment.</em></p>
             </div>
             """
             map_html.set(error_html)
-            print(f"Error in load_kml: {e}")
-            print(error_details)
     
     @render.ui
     def map_display():
-        html_content = map_html()
-        if html_content is None:
+        if map_html() is None:
             return ui.tags.div("Loading map...", style="padding: 20px;")
-        return ui.HTML(html_content)
+        return ui.HTML(map_html())
 
 
 app = App(app_ui, server)
