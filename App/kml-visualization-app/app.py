@@ -16,16 +16,77 @@ app_ui = ui.page_fluid(
 def read_kml_file(file_path: str) -> str:
     """
     Reads a KML file from Databricks Volume.
-    In Databricks, Volumes are accessible via standard file system paths.
+    Tries multiple methods to access the file since volume paths can vary.
     """
+    import os
+    
+    # Try different path variations
+    paths_to_try = [
+        file_path,  # Original path
+        file_path.replace("/Volumes/", "/Volumes/"),  # Keep as is first
+    ]
+    
+    # Check if running in Databricks environment and try dbutils
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        from pyspark.dbutils import DBUtils
+        spark = None
+        try:
+            from pyspark.sql import SparkSession
+            spark = SparkSession.builder.getOrCreate()
+        except:
+            pass
+        
+        if spark:
+            dbutils = DBUtils(spark)
+            # Try reading with dbutils
+            try:
+                file_content = dbutils.fs.head(file_path)
+                return file_content.decode('utf-8')
+            except Exception as dbutils_error:
+                print(f"dbutils approach failed: {dbutils_error}")
+                # Try with different path formats
+                try:
+                    # Try without /Volumes prefix
+                    alt_path = file_path.replace("/Volumes/", "/")
+                    file_content = dbutils.fs.head(alt_path)
+                    return file_content.decode('utf-8')
+                except:
+                    pass
+    except ImportError:
+        print("dbutils not available, trying file system access")
     except Exception as e:
-        print(f"Error reading KML file: {e}")
-        # If direct file access doesn't work, we might need to use dbutils
-        # which is only available in notebooks, so we'll handle that case
-        raise e
+        print(f"Error with dbutils: {e}")
+    
+    # Try direct file system access with different path variations
+    for path in paths_to_try:
+        try:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return f.read()
+        except Exception as e:
+            print(f"Failed to read from {path}: {e}")
+            continue
+    
+    # List directory contents for debugging
+    try:
+        dir_path = os.path.dirname(file_path)
+        if os.path.exists(dir_path):
+            files = os.listdir(dir_path)
+            print(f"Files in directory {dir_path}: {files}")
+    except Exception as e:
+        print(f"Could not list directory: {e}")
+    
+    # Final attempt - try reading as raw bytes then decode
+    try:
+        with open(file_path, 'rb') as f:
+            content = f.read()
+            return content.decode('utf-8')
+    except Exception as e:
+        raise FileNotFoundError(
+            f"Could not read KML file from any attempted path. "
+            f"Tried: {paths_to_try}. "
+            f"Last error: {e}"
+        )
 
 
 def parse_and_visualize_kml(kml_content: str) -> str:
