@@ -749,6 +749,68 @@ display(pd.DataFrame(precompute_summary))
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 9b. Demo cheat sheet — sidebar values per preset
+# MAGIC
+# MAGIC Run this cell to print the exact sidebar inputs to set in the app for
+# MAGIC each cached preset. Bookmark / screenshot the resulting table; during
+# MAGIC the demo, glance at it to know what to type so the hash matches a
+# MAGIC cached render and you get an instant flip.
+
+# COMMAND ----------
+
+cheatsheet_rows = []
+for cfg in PRESETS:
+    scene_cfg = cfg.to_dict()
+    cells = cells_for_preset(cfg, base_cells)
+    config_hash = compute_config_hash(scene_cfg, cells)
+
+    # Effective TX power across cells (the override, or the default 44 dBm).
+    power_dbm = (
+        cfg.cell_power_override_dbm
+        if cfg.cell_power_override_dbm is not None
+        else 44.0
+    )
+
+    cheatsheet_rows.append({
+        "preset":      cfg.name,
+        "hash":        config_hash[:12],
+        "TX array":    f"{cfg.num_rows_tx} × {cfg.num_cols_tx}",
+        "RX array":    f"{cfg.num_rows_rx} × {cfg.num_cols_rx}",
+        "Pattern":     cfg.pattern,
+        "Polariz.":    cfg.polarization,
+        "TX pwr dBm":  power_dbm,
+        "Freq GHz":    round(cfg.frequency_hz / 1e9, 3),
+        "BW MHz":      round(cfg.bandwidth_hz / 1e6, 1),
+        "max_depth":   cfg.max_depth,
+        "samples 10^": int(round(__import__("math").log10(cfg.samples_per_tx))),
+    })
+
+cheatsheet_df = pd.DataFrame(cheatsheet_rows)
+
+# Pretty-print the same thing as plain text so the cheat sheet is copy-pastable.
+print("APP SIDEBAR CHEAT SHEET — type these values to match each cached preset")
+print("=" * 110)
+for row in cheatsheet_rows:
+    print(
+        f"  {row['preset']:<55}  hash={row['hash']}"
+    )
+    diffs = []
+    if row['TX array']    != "8 × 2":     diffs.append(f"TX={row['TX array']}")
+    if row['RX array']    != "2 × 2":     diffs.append(f"RX={row['RX array']}")
+    if row['Pattern']     != "tr38901":   diffs.append(f"pattern={row['Pattern']}")
+    if row['Polariz.']    != "V":         diffs.append(f"pol={row['Polariz.']}")
+    if row['TX pwr dBm']  != 44.0:        diffs.append(f"power={row['TX pwr dBm']} dBm")
+    if row['Freq GHz']    != 28.0:        diffs.append(f"freq={row['Freq GHz']} GHz")
+    if row['BW MHz']      != 100.0:       diffs.append(f"BW={row['BW MHz']} MHz")
+    if row['max_depth']   != 5:           diffs.append(f"max_depth={row['max_depth']}")
+    print(f"      vs Config 1 default → {', '.join(diffs) if diffs else 'no changes (same as Config 1)'}")
+print("=" * 110)
+
+display(cheatsheet_df)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 10. Quick verification — pull one preset back from Lakebase
 
 # COMMAND ----------
