@@ -119,21 +119,24 @@ def _association_png(radio_map, num_user_samples: int, min_sinr_db: float,
 
 
 def _cdf_png(radio_map, metric: str, xlim: tuple[float, float]) -> tuple[bytes, dict]:
-    """Render the CDF for `metric` ('sinr' or 'rss') and return percentile summary."""
-    fig = plt.figure(figsize=(6, 4))
+    """Render the CDF for `metric` ('sinr' or 'rss') and return percentile summary.
+
+    Sionna's `radio_map.cdf()` opens its own matplotlib figure, so we let it
+    do that and then grab whatever figure is current — pre-creating a figure
+    here would just produce an empty plot.
+    """
+    plt.close("all")
     radio_map.cdf(metric=metric, bins=400)
     plt.xlim(*xlim)
     plt.title(f"CDF of {metric.upper()}")
+    fig = plt.gcf()
 
-    # Pull the plotted line out of the current axes for percentile summary.
-    ax = plt.gca()
     summary: dict[str, float] = {}
-    for line in ax.get_lines():
+    for line in fig.gca().get_lines():
         xs, ys = line.get_xdata(), line.get_ydata()
         if len(xs) > 0:
             for p in (10, 50, 90):
-                idx = int(np.searchsorted(ys, p / 100.0))
-                idx = min(idx, len(xs) - 1)
+                idx = min(int(np.searchsorted(ys, p / 100.0)), len(xs) - 1)
                 summary[f"p{p}"] = float(xs[idx])
             break
     return _fig_to_png(fig), summary

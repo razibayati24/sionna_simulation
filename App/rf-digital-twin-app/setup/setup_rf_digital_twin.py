@@ -510,12 +510,14 @@ def _association_png(radio_map, scene_cfg) -> tuple[bytes, dict]:
 
 
 def _cdf_png(radio_map, metric: str, xlim: tuple[float, float]) -> tuple[bytes, dict]:
-    fig = plt.figure(figsize=(6, 4))
+    # Let Sionna's cdf() create its own figure, then grab it.
+    plt.close("all")
     radio_map.cdf(metric=metric, bins=400)
     plt.xlim(*xlim)
     plt.title(f"CDF of {metric.upper()}")
+    fig = plt.gcf()
     summary: dict[str, float] = {}
-    for line in plt.gca().get_lines():
+    for line in fig.gca().get_lines():
         xs, ys = line.get_xdata(), line.get_ydata()
         if len(xs):
             for p in (10, 50, 90):
