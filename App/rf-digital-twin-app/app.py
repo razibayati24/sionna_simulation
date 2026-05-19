@@ -116,6 +116,14 @@ def _submit_databricks_job(config_hash: str, scene_cfg: dict, cells: list[dict])
     return int(run.run_id)
 
 
+def _cancel_databricks_run(run_id: int) -> None:
+    """Cancel an in-flight Sionna run. Best-effort — errors are swallowed."""
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient()
+    w.jobs.cancel_run(run_id=int(run_id))
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -177,6 +185,8 @@ def _sidebar() -> ui.Tag:
             "render_btn", "Render scene", class_="btn-success",
             style="width: 100%;",
         ),
+        # Cancel slot — rendered conditionally on a pending job.
+        ui.output_ui("cancel_slot"),
         width=340,
     )
 
@@ -203,137 +213,184 @@ app_ui = ui.page_sidebar(
 def server(input, output, session):
 
     render_state = reactive.Value({
-        "config_hash": None,
-        "scene": None,
-        "cells": None,
-        "data": None,           # cached_renders row
-        "kpis": None,
-        "run_id": None,         # job run currently in flight (or last one)
-        "started_at": None,     # epoch s when current job submitted; None if idle
-        "status": "Ready. Edit the config in the sidebar, then click Render.",
-        "error": None,
+        # What's currently shown in the tabs.
+        "config_hash":      None,    # hash of the render in `data`, or hash of an in-flight job
+        "scene":            None,    # scene_cfg dict last submitted
+        "data":             None,    # cached_renders row to display
+        "kpis":             None,
+        # Pending-job tracker — when a cache miss has triggered a Sionna run.
+        "pending_hash":     None,    # hash being computed; None when idle
+        "pending_run_id":   None,    # Databricks Jobs run_id
+        "pending_started":  None,    # epoch seconds when submitted
+        # User-visible.
+        "status":           "Ready. Edit the config in the sidebar, then click Render.",
+        "error":            None,
     })
 
     async def _try_load_cached(config_hash: str) -> dict | None:
         return await asyncio.to_thread(lb.get_render, config_hash)
 
+    def _apply_cached(state, config_hash, scene_cfg, cached, status_msg):
+        """Populate render_state with a cache hit."""
+        kpis = cached.get("kpis_json")
+        if isinstance(kpis, (bytes, str)):
+            kpis = json.loads(kpis)
+        render_state.set({
+            **state,
+            "config_hash":     config_hash,
+            "scene":           scene_cfg,
+            "data":            cached,
+            "kpis":            kpis,
+            # Clear any pending tracker if the cache hit matches it.
+            "pending_hash":    None if state.get("pending_hash") == config_hash else state.get("pending_hash"),
+            "pending_run_id":  None if state.get("pending_hash") == config_hash else state.get("pending_run_id"),
+            "pending_started": None if state.get("pending_hash") == config_hash else state.get("pending_started"),
+            "status":          status_msg,
+            "error":           None,
+        })
+
     async def _do_render() -> None:
+        """Non-blocking. Cache hit -> load and return. Cache miss -> submit
+        the Databricks job, record the pending run, and return immediately.
+        A background reactive timer polls Lakebase until results land."""
         try:
             scene_cfg = _collect_scene(input)
             cells = _collect_cells(input)
             config_hash = lb.compute_config_hash(scene_cfg, cells)
 
-            render_state.set({
-                **render_state(),
-                "config_hash": config_hash,
-                "scene": scene_cfg,
-                "cells": cells,
-                "status": f"Looking up cache for {config_hash[:12]}…",
-                "error": None,
-            })
-
+            # 1) Cache hit — instant load, regardless of any in-flight job.
             cached = await _try_load_cached(config_hash)
             if cached:
-                kpis = cached.get("kpis_json")
-                if isinstance(kpis, (bytes, str)):
-                    kpis = json.loads(kpis)
-                render_state.set({
-                    **render_state(),
-                    "data": cached,
-                    "kpis": kpis,
-                    "status": (
-                        f"Loaded cached render ({config_hash[:12]}) "
-                        f"computed in {cached.get('compute_seconds', 0):.1f}s."
-                    ),
-                })
+                _apply_cached(
+                    render_state(), config_hash, scene_cfg, cached,
+                    f"Loaded cached render ({config_hash[:12]}) computed in "
+                    f"{cached.get('compute_seconds', 0):.1f}s.",
+                )
                 ui.update_navs("main_tabs", selected="Scene render")
                 return
+
+            # 2) Cache miss — cancel any previous pending job first so we're
+            # only ever holding one cluster at a time.
+            prev_run = render_state().get("pending_run_id")
+            if prev_run:
+                try:
+                    await asyncio.to_thread(_cancel_databricks_run, prev_run)
+                except Exception as e:
+                    print(f"Failed to cancel previous run {prev_run}: {e}")
 
             if not SIONNA_JOB_ID:
                 render_state.set({
                     **render_state(),
+                    "config_hash":     config_hash,
+                    "scene":           scene_cfg,
+                    "pending_hash":    None,
+                    "pending_run_id":  None,
+                    "pending_started": None,
                     "status": "Cache miss and live compute disabled.",
                     "error": (
                         "No cached render for this configuration and SIONNA_JOB_ID "
-                        "is not set. Pick Config 1 or Config 2, or wire up the "
-                        "Sionna compute job (see README)."
+                        "is not set. Pick a preset from the cheat sheet."
                     ),
                 })
                 return
 
-            await asyncio.to_thread(
-                lb.upsert_scene_config, scene_cfg, cells, False,
-            )
+            await asyncio.to_thread(lb.upsert_scene_config, scene_cfg, cells, False)
             run_id = await asyncio.to_thread(
                 _submit_databricks_job, config_hash, scene_cfg, cells,
             )
             await asyncio.to_thread(
                 lb.set_job_status, config_hash, "RUNNING", run_id, None,
             )
-            started_at = time.time()
             render_state.set({
                 **render_state(),
-                "run_id": run_id,
-                "started_at": started_at,
+                "config_hash":     config_hash,
+                "scene":           scene_cfg,
+                "pending_hash":    config_hash,
+                "pending_run_id":  run_id,
+                "pending_started": time.time(),
                 "status": (
-                    f"Sionna compute job submitted "
-                    f"(run_id={run_id}). Spinning up GPU cluster…"
+                    f"Sionna job submitted (run_id={run_id}). Spinning up GPU "
+                    f"cluster. You can keep clicking cached presets while it runs; "
+                    f"results will auto-appear here when ready."
                 ),
+                "error": None,
             })
-
-            # Poll until the cache row appears, up to ~15 minutes.
-            for tick in range(90):
-                await asyncio.sleep(10)
-                cached = await _try_load_cached(config_hash)
-                if cached:
-                    kpis = cached.get("kpis_json")
-                    if isinstance(kpis, (bytes, str)):
-                        kpis = json.loads(kpis)
-                    elapsed = time.time() - started_at
-                    render_state.set({
-                        **render_state(),
-                        "data": cached,
-                        "kpis": kpis,
-                        "run_id": run_id,
-                        "started_at": None,
-                        "status": (
-                            f"Job complete (run_id={run_id}) — render cached "
-                            f"in {cached.get('compute_seconds', 0):.1f}s "
-                            f"(end-to-end {elapsed:.0f}s)."
-                        ),
-                    })
-                    ui.update_navs("main_tabs", selected="Scene render")
-                    return
-
-                # Progress message every ~30s
-                elapsed = int(time.time() - started_at)
-                remaining = max(JOB_ETA_SECONDS - elapsed, 30)
-                render_state.set({
-                    **render_state(),
-                    "run_id": run_id,
-                    "started_at": started_at,
-                    "status": (
-                        f"Sionna job running (run_id={run_id}). "
-                        f"Elapsed {elapsed//60}m{elapsed%60:02d}s, "
-                        f"estimated ~{remaining//60}m{remaining%60:02d}s remaining."
-                    ),
-                })
-
-            render_state.set({
-                **render_state(),
-                "status": (
-                    f"Polling timed out after 15 minutes. The job may still be "
-                    f"running — refresh the page or check run {run_id} in Databricks."
-                ),
-            })
+            # Return immediately — the background poller (defined below)
+            # picks up the pending hash and updates state when the job lands.
 
         except Exception as e:
             render_state.set({
                 **render_state(),
-                "error": str(e),
+                "error":  str(e),
                 "status": "Render failed.",
             })
             traceback.print_exc()
+
+    # ------------------------------------------------------------------
+    # Background poller — runs every ~10 s. Checks Lakebase for any
+    # pending hash and pulls results when they land. Updates the status
+    # text in between so the user sees elapsed time.
+    # ------------------------------------------------------------------
+    @reactive.effect
+    async def _background_poll():
+        reactive.invalidate_later(10)
+        st = render_state()
+        pending_hash = st.get("pending_hash")
+        if not pending_hash:
+            return
+
+        try:
+            cached = await asyncio.to_thread(lb.get_render, pending_hash)
+        except Exception as e:
+            print(f"Background poll: get_render failed: {e}")
+            return
+
+        if cached:
+            elapsed = time.time() - (st.get("pending_started") or time.time())
+            _apply_cached(
+                st, pending_hash, st.get("scene"), cached,
+                f"Pending job complete (run_id={st.get('pending_run_id')}) — "
+                f"render cached in {cached.get('compute_seconds', 0):.1f}s "
+                f"(end-to-end {elapsed:.0f}s).",
+            )
+            # Only nudge the user to the render tab if they're still on Status.
+            return
+
+        # Still running — refresh the elapsed time in the status banner.
+        elapsed = int(time.time() - (st.get("pending_started") or time.time()))
+        remaining = max(JOB_ETA_SECONDS - elapsed, 30)
+        render_state.set({
+            **st,
+            "status": (
+                f"Sionna job running (run_id={st.get('pending_run_id')}). "
+                f"Elapsed {elapsed//60}m{elapsed%60:02d}s, "
+                f"~{remaining//60}m{remaining%60:02d}s remaining. "
+                f"Switch to any cached preset to keep exploring."
+            ),
+        })
+
+    # ------------------------------------------------------------------
+    # Cancel button — only emitted when a job is pending.
+    # ------------------------------------------------------------------
+    @reactive.effect
+    @reactive.event(input.cancel_btn, ignore_init=True, ignore_none=True)
+    async def _on_cancel():
+        run_id = render_state().get("pending_run_id")
+        if not run_id:
+            return
+        try:
+            await asyncio.to_thread(_cancel_databricks_run, run_id)
+            msg = f"Cancelled run {run_id}."
+        except Exception as e:
+            msg = f"Cancel requested for run {run_id} but failed: {e}"
+            traceback.print_exc()
+        render_state.set({
+            **render_state(),
+            "pending_hash":    None,
+            "pending_run_id":  None,
+            "pending_started": None,
+            "status": msg,
+        })
 
     # ------------------------------------------------------------------
     # Auto-load: on first server start, pull Config 1 from cache.
@@ -386,6 +443,25 @@ def server(input, output, session):
     @reactive.event(input.render_btn)
     async def _render():
         await _do_render()
+
+    # ------------------------------------------------------------------
+    # Cancel button — only rendered when a job is pending.
+    # ------------------------------------------------------------------
+    @render.ui
+    def cancel_slot():
+        if not render_state().get("pending_run_id"):
+            return ui.div()
+        return ui.div(
+            ui.input_action_button(
+                "cancel_btn", "Cancel pending job", class_="btn-danger",
+                style="width: 100%; margin-top: 6px;",
+            ),
+            ui.tags.div(
+                "A Sionna job is running in the background. "
+                "Cancelling stops the cluster; cached presets still load instantly.",
+                style="font-size: 11px; color: #888; margin-top: 4px;",
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Views
@@ -462,8 +538,8 @@ def server(input, output, session):
     def status_view():
         try:
             st = render_state()
-            is_running = bool(st.get("started_at"))
-            run_id = st.get("run_id")
+            is_running = bool(st.get("pending_started"))
+            run_id = st.get("pending_run_id")
             status_text = st.get("status") or "(no status)"
             config_hash = st.get("config_hash") or "—"
             error_text = st.get("error")
