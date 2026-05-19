@@ -109,9 +109,11 @@ CONFIG_DENS_32X8 = SceneConfig("A · Densification — 32×8 TX (elongated)", 32
 
 # Story B — Frequency band ladder. 8×2 TX held constant. Bandwidth scaled to
 # realistic deployment for each band.
-CONFIG_FREQ_700M = SceneConfig(
-    "B · Frequency — 8×2 @ 700 MHz (coverage band)",
-    8, 2, 2, 2, frequency_hz=7e8, bandwidth_hz=2e7,
+# Note: the etoile scene's ITU `marble` material is only defined for 1–100 GHz,
+# so the low end of this ladder is 1.8 GHz (LTE band 3), not 700 MHz.
+CONFIG_FREQ_1P8G = SceneConfig(
+    "B · Frequency — 8×2 @ 1.8 GHz (LTE coverage band)",
+    8, 2, 2, 2, frequency_hz=1.8e9, bandwidth_hz=2e7,
 )
 CONFIG_FREQ_2P6G = SceneConfig(
     "B · Frequency — 8×2 @ 2.6 GHz (LTE/NR FR1)",
@@ -168,7 +170,7 @@ PRESETS: dict[str, SceneConfig] = {
     "dens_32x8":  CONFIG_DENS_32X8,
 
     # Story B
-    "freq_700m":  CONFIG_FREQ_700M,
+    "freq_1p8g":  CONFIG_FREQ_1P8G,
     "freq_2p6g":  CONFIG_FREQ_2P6G,
     "freq_3p5g":  CONFIG_FREQ_3P5G,
     "freq_39g":   CONFIG_FREQ_39G,

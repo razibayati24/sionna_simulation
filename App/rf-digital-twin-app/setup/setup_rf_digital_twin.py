@@ -220,7 +220,9 @@ CONFIG_2         = SceneConfig("A · Densification — 16×16 TX (Config 2)", 16
 CONFIG_DENS_32X8 = SceneConfig("A · Densification — 32×8 TX (elongated)", 32, 8, 2, 2)
 
 # Story B — Frequency band ladder (8×2 TX held constant)
-CONFIG_FREQ_700M = SceneConfig("B · Frequency — 8×2 @ 700 MHz",  8, 2, 2, 2, frequency_hz=7e8,    bandwidth_hz=2e7)
+# Note: the etoile scene's ITU `marble` material is only defined for 1–100 GHz,
+# so the lowest band here is 1.8 GHz (LTE band 3), not 700 MHz.
+CONFIG_FREQ_1P8G = SceneConfig("B · Frequency — 8×2 @ 1.8 GHz",  8, 2, 2, 2, frequency_hz=1.8e9,  bandwidth_hz=2e7)
 CONFIG_FREQ_2P6G = SceneConfig("B · Frequency — 8×2 @ 2.6 GHz",  8, 2, 2, 2, frequency_hz=2.6e9,  bandwidth_hz=2e7)
 CONFIG_FREQ_3P5G = SceneConfig("B · Frequency — 8×2 @ 3.5 GHz",  8, 2, 2, 2, frequency_hz=3.5e9,  bandwidth_hz=1e8)
 CONFIG_FREQ_39G  = SceneConfig("B · Frequency — 8×2 @ 39 GHz",   8, 2, 2, 2, frequency_hz=3.9e10, bandwidth_hz=4e8)
@@ -246,7 +248,7 @@ CONFIG_DEPTH_8 = SceneConfig("G · Fidelity — 16×16 max_depth=8", 16, 16, 2, 
 
 PRESETS = [
     CONFIG_DENS_2X2, CONFIG_DENS_4X4, CONFIG_1, CONFIG_DENS_8X8, CONFIG_2, CONFIG_DENS_32X8,
-    CONFIG_FREQ_700M, CONFIG_FREQ_2P6G, CONFIG_FREQ_3P5G, CONFIG_FREQ_39G,
+    CONFIG_FREQ_1P8G, CONFIG_FREQ_2P6G, CONFIG_FREQ_3P5G, CONFIG_FREQ_39G,
     CONFIG_PAT_ISO, CONFIG_PAT_DIPOLE,
     CONFIG_POL_VH,
     CONFIG_PWR_LOW, CONFIG_PWR_HIGH,
@@ -730,20 +732,39 @@ for cfg in PRESETS:
         continue
 
     print(f"  Running Sionna RT (samples_per_tx={SAMPLES_PER_TX:,})…")
-    results = run_simulation(scene_cfg, cells)
-    write_render(config_hash, results)
+    try:
+        results = run_simulation(scene_cfg, cells)
+        write_render(config_hash, results)
+        print(f"  Done in {results['compute_seconds']:.1f}s, cached to Lakebase.")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "compute_seconds": results["compute_seconds"],
+            "status": "rendered",
+            "kpis": json.loads(results["kpis_json"]),
+        })
+    except Exception as e:
+        # Don't abort the whole loop — log this preset's failure and continue.
+        # Common causes: ITU material undefined at chosen frequency, GPU OOM
+        # at high cell count + samples, missing pattern, etc.
+        msg = f"{type(e).__name__}: {e}"
+        print(f"  FAILED — {msg}")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "status": "FAILED",
+            "error": msg,
+        })
 
-    print(f"  Done in {results['compute_seconds']:.1f}s, cached to Lakebase.")
-    precompute_summary.append({
-        "name": cfg.name,
-        "config_hash": config_hash,
-        "compute_seconds": results["compute_seconds"],
-        "status": "rendered",
-        "kpis": json.loads(results["kpis_json"]),
-    })
-
-print(f"\nFinished. {sum(1 for s in precompute_summary if s.get('status') == 'rendered')} new renders, "
-      f"{sum(1 for s in precompute_summary if s.get('status') == 'skipped (already cached)')} skipped.")
+n_rendered = sum(1 for s in precompute_summary if s.get('status') == 'rendered')
+n_skipped  = sum(1 for s in precompute_summary if s.get('status') == 'skipped (already cached)')
+n_failed   = sum(1 for s in precompute_summary if s.get('status') == 'FAILED')
+print(f"\nFinished. {n_rendered} new renders, {n_skipped} skipped, {n_failed} failed.")
+if n_failed:
+    print("Failed presets:")
+    for s in precompute_summary:
+        if s.get('status') == 'FAILED':
+            print(f"  - {s['name']}: {s['error']}")
 display(pd.DataFrame(precompute_summary))
 
 # COMMAND ----------
