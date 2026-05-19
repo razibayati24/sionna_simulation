@@ -215,33 +215,33 @@ Lakebase keeps an open `psycopg` connection on the app side, so the steady-state
 
 Approximate median wall-clock for **one render** that pulls **N cached rows** from the cache at a given concurrent-user load. Rows correspond to the unit of cache you fetch per render — e.g., one row for a single preset, 7 rows if the app stitches a 7-tile city view, 500 rows for a metro overlay.
 
-Both tables hold **tier size fixed at the same price point** for a direct comparison: **Lakebase `CU_2`** vs **Lakehouse `Large` serverless SQL warehouse** (both single-cluster, warm — no cold-start tax included). Payload per row ≈ 1 MB (5 cached PNGs + KPI JSON). "queue" = no failures, just tail-latency degradation; "fail" = sustained timeouts.
+Both tables hold **tier size fixed at the same price point** for a direct comparison: **Lakebase `CU_4`** vs **Lakehouse `X-Large` serverless SQL warehouse** (both single-cluster, warm — no cold-start tax included). Payload per row ≈ 1 MB (5 cached PNGs + KPI JSON). "queue" = no failures, just tail-latency degradation; "fail" = sustained timeouts.
 
-#### Lakebase (CU_2)
-
-| Cached rows / render | **1 user** | **10** | **50** | **200** | **1 000** |
-| --- | --- | --- | --- | --- | --- |
-| **1**   | 10 ms  | 12 ms  | 20 ms   | 50 ms    | ~300 ms |
-| **7**   | 25 ms  | 30 ms  | 50 ms   | 150 ms   | ~800 ms |
-| **25**  | 80 ms  | 100 ms | 200 ms  | 500 ms   | ~2 s |
-| **100** | 250 ms | 350 ms | 700 ms  | 1.5 s    | saturating |
-| **500** | 1 s    | 1.5 s  | 3 s     | 7 s      | failing |
-
-Lakebase fetches N rows in a single round-trip via an `IN (…)` lookup or a small parameterised batch. Scaling is roughly linear in both row count and concurrent users until the CU_2 instance saturates on CPU or network bandwidth.
-
-#### Lakehouse (Large SQL warehouse)
+#### Lakebase (CU_4)
 
 | Cached rows / render | **1 user** | **10** | **50** | **200** | **1 000** |
 | --- | --- | --- | --- | --- | --- |
-| **1**   | 300 ms | 350 ms | 500 ms  | 1–2 s    | queue |
-| **7**   | 400 ms | 500 ms | 800 ms  | 2–3 s    | queue, 10 s+ |
-| **25**  | 600 ms | 800 ms | 1.5 s   | 3–4 s    | queue, 15 s+ |
-| **100** | 1.5 s  | 2 s    | 4 s     | 6–8 s    | fail |
-| **500** | 5 s    | 7 s    | queue, 15 s+ | fail | fail |
+| **1**   | 10 ms  | 12 ms  | 15 ms   | 30 ms    | ~150 ms |
+| **7**   | 20 ms  | 25 ms  | 35 ms   | 80 ms    | ~400 ms |
+| **25**  | 60 ms  | 70 ms  | 120 ms  | 300 ms   | ~1 s |
+| **100** | 200 ms | 250 ms | 450 ms  | 1 s      | ~3 s |
+| **500** | 700 ms | 1 s    | 2 s     | 4 s      | saturating |
 
-Lakehouse pays a fixed ~250 ms floor per render (HTTPS handshake + query planning) regardless of row count, then accrues Thrift transport time as the BINARY payload grows. A `Large` warehouse handles ~40 concurrent queries before queueing; past that, tail latency rises sharply.
+Lakebase fetches N rows in a single round-trip via an `IN (…)` lookup or a small parameterised batch. Scaling is roughly linear in both row count and concurrent users until the `CU_4` instance saturates on CPU or network bandwidth.
 
-**Lift the Lakehouse ceiling** with multi-cluster load balancing on serverless (each extra cluster multiplies the concurrent-query cap). For Lakebase, jump from `CU_2` to `CU_4`/`CU_8` to cut saturation latency roughly in half each step. Pick by where your traffic profile falls in these tables.
+#### Lakehouse (X-Large SQL warehouse)
+
+| Cached rows / render | **1 user** | **10** | **50** | **200** | **1 000** |
+| --- | --- | --- | --- | --- | --- |
+| **1**   | 250 ms | 300 ms | 400 ms  | 700 ms   | 3–5 s |
+| **7**   | 350 ms | 400 ms | 600 ms  | 1–2 s    | queue, 5 s+ |
+| **25**  | 500 ms | 700 ms | 1 s     | 2–3 s    | queue, 10 s+ |
+| **100** | 1.2 s  | 1.5 s  | 2.5 s   | 4–5 s    | queue, 15 s+ |
+| **500** | 4 s    | 5 s    | 8–10 s  | queue, 15 s+ | fail |
+
+Lakehouse pays a fixed ~250 ms floor per render (HTTPS handshake + query planning) regardless of row count, then accrues Thrift transport time as the BINARY payload grows. An `X-Large` warehouse handles ~80 concurrent queries before queueing; past that, tail latency rises sharply.
+
+**Lift the Lakehouse ceiling** with multi-cluster load balancing on serverless (each extra cluster multiplies the concurrent-query cap). For Lakebase, jump from `CU_4` to `CU_8`/`CU_16` to cut saturation latency roughly in half each step. Pick by where your traffic profile falls in these tables.
 
 ### Cost shape (rough monthly, AWS list)
 
