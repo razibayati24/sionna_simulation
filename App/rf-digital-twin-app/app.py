@@ -17,7 +17,7 @@ from typing import Any
 from shiny import App, ui, render, reactive
 
 import lakebase_client as lb
-from defaults import CONFIG_1, CONFIG_2, PRESETS, preset_cells
+from defaults import CONFIG_1, preset_cells
 
 
 # ---------------------------------------------------------------------------
@@ -79,29 +79,6 @@ def _collect_cells() -> list[dict]:
     return preset_cells()
 
 
-def _apply_preset(preset_key: str) -> None:
-    """Push a preset into the sidebar input controls."""
-    cfg = PRESETS[preset_key]
-
-    ui.update_numeric("num_rows_tx", value=cfg.num_rows_tx)
-    ui.update_numeric("num_cols_tx", value=cfg.num_cols_tx)
-    ui.update_numeric("num_rows_rx", value=cfg.num_rows_rx)
-    ui.update_numeric("num_cols_rx", value=cfg.num_cols_rx)
-    ui.update_select("pattern",      selected=cfg.pattern)
-    ui.update_select("polarization", selected=cfg.polarization)
-    ui.update_numeric("frequency_ghz", value=cfg.frequency_hz / 1e9)
-    ui.update_numeric("bandwidth_mhz", value=cfg.bandwidth_hz / 1e6)
-    ui.update_numeric("max_depth", value=cfg.max_depth)
-    ui.update_select("samples_log10",
-                     selected=str(int(round(__import__("math").log10(cfg.samples_per_tx)))))
-    ui.update_numeric("cell_size_x", value=cfg.cell_size_x)
-    ui.update_numeric("cell_size_y", value=cfg.cell_size_y)
-    ui.update_numeric("num_user_samples", value=cfg.num_user_samples)
-    ui.update_numeric("min_sinr_db", value=cfg.min_sinr_db)
-    ui.update_numeric("min_user_dist_m", value=cfg.min_user_dist_m)
-    ui.update_numeric("max_user_dist_m", value=cfg.max_user_dist_m)
-
-
 def _submit_databricks_job(config_hash: str, scene_cfg: dict, cells: list[dict]) -> int:
     """Trigger the Sionna compute job. Returns the Databricks run_id."""
     if not SIONNA_JOB_ID:
@@ -132,16 +109,6 @@ _initial_scene = CONFIG_1
 
 def _sidebar() -> ui.Tag:
     return ui.sidebar(
-        ui.h4("Presets"),
-        ui.input_action_button(
-            "preset_1", "Load Config 1 (8x2)", class_="btn-primary",
-            style="width: 100%; margin-bottom: 6px;",
-        ),
-        ui.input_action_button(
-            "preset_2", "Load Config 2 (16x16)", class_="btn-warning",
-            style="width: 100%;",
-        ),
-        ui.hr(),
         ui.h5("Antenna array"),
         ui.row(
             ui.column(6, ui.input_numeric("num_rows_tx", "TX rows",
@@ -367,21 +334,6 @@ def server(input, output, session):
                 "status": "Could not connect to Lakebase.",
             })
             traceback.print_exc()
-
-    # ------------------------------------------------------------------
-    # Preset buttons
-    # ------------------------------------------------------------------
-    @reactive.effect
-    @reactive.event(input.preset_1)
-    def _load_preset_1():
-        _apply_preset("config_1")
-        ui.notification_show("Loaded Config 1 (8x2 TX / 2x2 RX).", type="message", duration=3)
-
-    @reactive.effect
-    @reactive.event(input.preset_2)
-    def _load_preset_2():
-        _apply_preset("config_2")
-        ui.notification_show("Loaded Config 2 (16x16 TX / 2x2 RX).", type="message", duration=3)
 
     @reactive.effect
     @reactive.event(input.render_btn)
