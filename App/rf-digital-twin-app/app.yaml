@@ -7,17 +7,17 @@ command: [
   "app.py:app"
 ]
 
+env:
+  # Lakebase instance the app mints OAuth tokens for at runtime.
+  - name: "LAKEBASE_INSTANCE"
+    value: "rf-digital-twin-pg"
+
+  # (Optional) Set when you wire up jobs/sionna_compute_job.py for live re-renders.
+  # - name: "SIONNA_JOB_ID"
+  #   valueFrom: "sionna-job-id"
+
 # Resource bindings (configure in the Databricks Apps UI when creating the app):
-#
 #   1. Lakebase database  → instance: rf-digital-twin-pg, database: rf_digital_twin
-#      This automatically populates the following env vars in the container:
-#        PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE, PGAPPNAME
-#      No manual env mapping is needed for these.
-#
-#   2. (Optional) Secret  → key: sionna-job-id  (only if you wire up
-#      jobs/sionna_compute_job.py so the app can submit live re-renders).
-#      Uncomment the env entry below after creating that secret.
-#
-# env:
-#   - name: SIONNA_JOB_ID
-#     valueFrom: "sionna-job-id"
+#      This populates PGHOST / PGPORT / PGDATABASE / PGUSER (PGPASSWORD is NOT
+#      injected — the app mints a fresh OAuth token via the Databricks SDK).
+#   2. (Optional) Secret  → key: sionna-job-id  for live re-renders.
