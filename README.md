@@ -17,20 +17,123 @@ Three components:
 3. **`App/rf-digital-twin-app/jobs/sionna_compute_job.py`** — Databricks Job notebook. Triggered by the app on cache miss. Runs Sionna RT on a GPU job cluster and writes results back to Lakebase.
 
 ```
-┌─────────────────┐    cache miss    ┌────────────────────┐
-│ Shiny app       │ ───── Jobs API ──▶│ Sionna compute job │
-│ (Databricks App)│                  │ (g5.xlarge GPU)    │
-└────────┬────────┘                  └─────────┬──────────┘
-         │                                     │
-         │       reads renders                 │ writes renders
-         │       on cache hit                  ▼
-         │                            ┌────────────────────┐
-         └───────────────────────────▶│ Lakebase Postgres  │
-                                      │  scene_configs     │
-                                      │  cell_configs      │
-                                      │  cached_renders    │
-                                      └────────────────────┘
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  ① ONE-TIME SETUP — populates the cache                                 │
+   │                                                                         │
+   │     setup/setup_rf_digital_twin.py   (run once, GPU cluster ~30-50 min) │
+   │     ─ provisions Lakebase Postgres                                      │
+   │     ─ creates cmegdemos_catalog.sionna_rf_data UC schema                │
+   │     ─ renders 19 preset configurations through Sionna RT                │
+   │     ─ writes scene/SINR/CDF PNG bytes + KPI JSON → Lakebase             │
+   └────────────────────────────────────────┬────────────────────────────────┘
+                                            │
+                                            ▼
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  Lakebase Postgres  (rf-digital-twin-pg / database rf_digital_twin)     │
+   │  ─ scene_configs       one row per saved scene-level config + hash      │
+   │  ─ cell_configs        7 TX rows per scene config                       │
+   │  ─ cached_renders      PNG bytea + KPI JSONB keyed by config_hash       │
+   │  ─ compute_jobs        run-id and status for live re-renders            │
+   └─────────────────┬──────────────────────────────────┬────────────────────┘
+                     ▲                                  ▲
+                     │ reads on cache hit (<1 s)        │ writes on completion
+                     │                                  │
+   ┌─────────────────┴──────────────────┐  cache miss  ┌┴────────────────────┐
+   │  ② RUNTIME APP                     │ ── Jobs ──▶ │  ③ LIVE RE-RENDER   │
+   │                                    │   API       │                     │
+   │  App/rf-digital-twin-app/app.py    │             │  jobs/sionna_compute │
+   │  Shiny app deployed via            │             │  _job.py            │
+   │  Databricks Apps                   │             │                     │
+   │                                    │             │  Databricks Job      │
+   │  ─ reads cached renders by hash    │             │  417222810044410     │
+   │  ─ submits Job on cache miss       │             │  g5.xlarge GPU       │
+   │  ─ polls cache until job writes    │             │  ~5-8 min per render │
+   │     the new render                 │             │                     │
+   └────────────────────────────────────┘             └─────────────────────┘
 ```
+
+**Path 1 — Cache hit (the demo path):** user edits sidebar → `app.py` hashes the config → Lakebase `cached_renders` returns the row → renders display in under a second. This is what the cheat sheet below enables.
+
+**Path 2 — Cache miss (the live-edit path):** user submits an off-menu config → `app.py` calls the Databricks Jobs API → `jobs/sionna_compute_job.py` spins up a fresh `g5.xlarge` cluster, runs Sionna, writes the result back to Lakebase → app polls the cache and shows the new render. Wall-clock ≈ 5-8 min cold, 2-3 min warm.
+
+**Setup:** `setup/setup_rf_digital_twin.py` — a Databricks notebook the operator runs once on a GPU cluster to provision Lakebase and pre-render the preset gallery. Idempotent: re-running it only renders presets that aren't already cached, so adding new configs later is cheap.
+
+---
+
+## Preset gallery — what's cached in Lakebase
+
+These are the 19 sidebar combinations that resolve to a **cached render** (instant load). Anything outside this list triggers the live Sionna job described above.
+
+> **Reading the table:** every column is a sidebar input. To reach a row, type **all** of its values in the app sidebar — partial matches (e.g. "20 MHz BW" without also setting "TX 16×16") will not hash to a cached row and will fall to the live job. **All cells in the table that aren't called out keep their Story-A default values** (28 GHz, 100 MHz, tr38901, V, 44 dBm, max_depth 5, 8×2 RX 2×2, etc).
+
+### Story A — Antenna densification
+Same 28 GHz, 100 MHz, tr38901, V polarization, 44 dBm, max_depth 5. Only TX UPA changes.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `4d99ce0ad66c` | **2 × 2** | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `1947611f5ab1` | **4 × 4** | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `07934c589015` | **8 × 2** *(= Config 1)* | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `9dc696f16498` | **8 × 8** | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `7d40e2f4cf67` | **16 × 16** *(= Config 2)* | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `1f83af551835` | **32 × 8** | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | 5 |
+
+### Story B — Frequency band ladder
+TX held at 8 × 2 (Config 1 array). Only frequency + bandwidth change.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `c97b934ed651` | 8 × 2 | 2 × 2 | **1.8 GHz** | **20 MHz** | tr38901 | V | 44 dBm | 5 |
+| `8e58d2b3aa3b` | 8 × 2 | 2 × 2 | **2.6 GHz** | **20 MHz** | tr38901 | V | 44 dBm | 5 |
+| `2b4207dac650` | 8 × 2 | 2 × 2 | **3.5 GHz** | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `07934c589015` | 8 × 2 | 2 × 2 | **28 GHz** *(= Config 1)* | 100 MHz | tr38901 | V | 44 dBm | 5 |
+| `411bcd0ac9fc` | 8 × 2 | 2 × 2 | **39 GHz** | **400 MHz** | tr38901 | V | 44 dBm | 5 |
+
+### Story C — Antenna pattern
+TX held at 16 × 16. Only pattern changes.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `7d40e2f4cf67` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | **tr38901** *(= Config 2)* | V | 44 dBm | 5 |
+| `74315cd0c5a0` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | **iso** | V | 44 dBm | 5 |
+| `4d5194498776` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | **dipole** | V | 44 dBm | 5 |
+
+### Story D — Polarization
+TX held at 16 × 16, tr38901 pattern. Only polarization changes.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `7d40e2f4cf67` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | **V** *(= Config 2)* | 44 dBm | 5 |
+| `1dcfea9eb314` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | **VH** | 44 dBm | 5 |
+
+### Story E — TX power
+TX held at 16 × 16. Power applied uniformly across all 7 cells.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `4d3b2585ea77` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | **38 dBm** | 5 |
+| `7d40e2f4cf67` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | **44 dBm** *(= Config 2)* | 5 |
+| `c9960aa40101` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | **50 dBm** | 5 |
+
+### Story F — Bandwidth
+TX held at 16 × 16. Only bandwidth changes.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `1b0bae11e49c` | 16 × 16 | 2 × 2 | 28 GHz | **20 MHz** | tr38901 | V | 44 dBm | 5 |
+| `7d40e2f4cf67` | 16 × 16 | 2 × 2 | 28 GHz | **100 MHz** *(= Config 2)* | tr38901 | V | 44 dBm | 5 |
+| `d7d1abe8d6b0` | 16 × 16 | 2 × 2 | 28 GHz | **400 MHz** | tr38901 | V | 44 dBm | 5 |
+
+### Story G — Ray tracing fidelity
+TX held at 16 × 16. Only max_depth changes.
+
+| Hash prefix | TX array | RX array | Freq | BW | Pattern | Pol | TX power | max_depth |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `1bfc66c11279` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | **3** |
+| `7d40e2f4cf67` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | **5** *(= Config 2)* |
+| `74c31dcc5ea6` | 16 × 16 | 2 × 2 | 28 GHz | 100 MHz | tr38901 | V | 44 dBm | **8** |
+
+> The Status tab in the app shows the live `config_hash`. When you've typed values that match a row in the tables above, the first 12 chars of that hash should equal the table's hash prefix — that's your visual confirmation that you're about to hit the cache.
 
 ---
 
