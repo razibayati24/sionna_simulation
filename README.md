@@ -193,12 +193,14 @@ For a single demo user clicking through cached presets, both feel instant. The a
 
 ### Hot-path latency per cache lookup
 
-| Workload | Lakebase (CU_1) | Lakehouse (Small serverless SQL warehouse) |
+| Workload | Lakebase (CU_1, auto-stop) | Lakehouse (Small serverless SQL warehouse) |
 | --- | --- | --- |
-| Cold path (warehouse idle ≥5 min, scaled to zero) | 10–30 ms | **30–60 s warehouse cold-start**, then 200–500 ms |
+| Cold path (instance/warehouse paused) | **~5–15 s instance resume**, then 5–15 ms | **30–60 s warehouse cold-start**, then 200–500 ms |
 | Warm hit, single row by `config_hash` | **5–15 ms** | 200–400 ms |
 | Single 1 MB PNG blob fetch | **20–50 ms** | 300–800 ms |
 | Sustained QPS per instance/warehouse | **1 000+** | 50–200 |
+
+Both backends support auto-pause, but Lakebase resumes in seconds (typical OLTP wake-up) where a SQL warehouse takes ~30–60 s. If you can't tolerate a Lakebase cold start either, leave auto-stop off; the steady-state cost increase is small (see below).
 
 Where the Lakehouse latency goes for a warm hit:
 
@@ -222,14 +224,17 @@ SQL warehouses cap concurrent queries per cluster (Small ≈ 10, Medium ≈ 20, 
 
 ### Cost shape (rough monthly, AWS list)
 
-| Traffic pattern | Lakebase | Lakehouse (serverless SQL) |
-| --- | --- | --- |
-| Light, intermittent (~10 req/hr) | ~$200/mo | ~$30–80/mo (occasional wake-ups) |
-| Steady (~100 req/hr) | ~$200/mo | ~$200–400/mo (warehouse stays warm) |
-| Heavy (1 000+ req/hr) | ~$200–400/mo (size up if needed) | ~$500–1 500/mo (warm + scaled) |
-| Render bytes storage | bytea in Postgres, ~included | Delta on S3, pennies for this dataset |
+Both backends bill by uptime: Lakebase by capacity-unit-hour (CUH) of running time, Lakehouse SQL warehouse by serverless DBU-hour. Both can auto-pause when idle.
 
-The crossover is roughly an order-of-magnitude apart: **Lakehouse wins on intermittent / bursty workloads** because of scale-to-zero; **Lakebase wins on sustained high-QPS** because Postgres has better throughput-per-dollar at saturation.
+| Traffic pattern | Lakebase (CU_1, auto-stop on) | Lakehouse (serverless SQL, auto-stop on) |
+| --- | --- | --- |
+| Light, intermittent (~10 req/hr) | ~$20–60/mo (mostly paused; small CUH × ~hours/day on) | ~$30–80/mo (occasional wake-ups) |
+| Steady (~100 req/hr) | ~$100–200/mo (often-on CU_1) | ~$200–400/mo (warehouse stays warm) |
+| Heavy (1 000+ req/hr) | ~$200–400/mo (continuous, size up if needed) | ~$500–1 500/mo (warm + multi-cluster) |
+| Render bytes storage | bytea in Postgres, ~included | Delta on S3, pennies for this dataset |
+| Always-on (auto-stop off) | ~$200/mo on top of the rows above | n/a — serverless warehouses always auto-stop |
+
+In practice the two have similar light-traffic cost when both have auto-stop on. **Lakebase pulls ahead on sustained high-QPS** because Postgres has better throughput-per-dollar at saturation. **Lakehouse pulls ahead when you also want the cached renders queryable as a data product** without an ETL hop.
 
 ### When to pick which
 
