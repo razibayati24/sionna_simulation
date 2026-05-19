@@ -17,19 +17,82 @@
 # MAGIC    into Lakebase so the app loads them instantly.
 # MAGIC 7. Prints the connection details to plug into the app's resource bindings.
 # MAGIC
-# MAGIC > **Cluster recommendation:** GPU cluster (e.g. `g4dn.xlarge` / `g5.xlarge`)
-# MAGIC > running DBR 15.x ML. A CPU cluster works but Sionna will take ~10–20
-# MAGIC > minutes per config instead of ~2–3.
+# MAGIC ## Cluster you need to provision
+# MAGIC
+# MAGIC Sionna RT calls NVIDIA OptiX for ray tracing — you **must** run this
+# MAGIC notebook on a GPU cluster whose Databricks Runtime ships with OptiX.
+# MAGIC DBR ML runtimes and plain DBR 16.x + GPU instance both include it; a
+# MAGIC CPU cluster will fail with `libnvoptix.so.1 could not be loaded`.
+# MAGIC
+# MAGIC **Validated configuration** (the one used to seed the demo):
+# MAGIC
+# MAGIC | Setting | Value |
+# MAGIC | --- | --- |
+# MAGIC | Cluster name | `sionna` (any name) |
+# MAGIC | Databricks Runtime | **16.4 LTS** (Scala 2.13) — plain, not ML |
+# MAGIC | Runtime engine | Standard |
+# MAGIC | Driver node | `g5.xlarge` (1× NVIDIA A10G GPU, 16 GB) |
+# MAGIC | Worker node | `g5.xlarge` |
+# MAGIC | Autoscaling | min 2, max 8 workers |
+# MAGIC | Access mode | Single user (your identity) |
+# MAGIC | Auto-termination | 120 minutes |
+# MAGIC | AWS availability | Spot with fallback to on-demand |
+# MAGIC | Init scripts | none |
+# MAGIC | Custom Spark conf | none |
+# MAGIC
+# MAGIC Cheaper alternatives that also work: `g4dn.xlarge` (T4 GPU) — slower
+# MAGIC ray tracing, but full OptiX. Avoid CPU-only or A1 (ARM) instances.
+# MAGIC
+# MAGIC Wall-clock you can expect: **~2–3 min per config** on g5.xlarge,
+# MAGIC ~5–8 min on g4dn.xlarge. Total notebook run on g5: ~10 minutes.
 # MAGIC
 # MAGIC > **Permissions required:**
 # MAGIC > - `USE CATALOG` + `CREATE SCHEMA` on `cmegdemos_catalog`
 # MAGIC > - Workspace permission to create Lakebase Database Instances
+# MAGIC >   (workspace quota is 10 — delete an unused one first if needed)
 # MAGIC > - You'll be acting as the Postgres role for the data load.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 0. Install dependencies
+# MAGIC ## 0. (Optional) Provision the GPU cluster from this notebook
+# MAGIC
+# MAGIC If you don't already have a Sionna-ready GPU cluster, run the cell
+# MAGIC below from a tiny job/serverless context to create one matching the
+# MAGIC validated config above. Then **attach this notebook to that new
+# MAGIC cluster** and continue from section 1. Skip if you've already got
+# MAGIC a GPU cluster attached.
+
+# COMMAND ----------
+
+# from databricks.sdk import WorkspaceClient
+# from databricks.sdk.service.compute import (
+#     AutoScale, AwsAttributes, AwsAvailability, ClusterSpec, DataSecurityMode,
+#     RuntimeEngine,
+# )
+#
+# w = WorkspaceClient()
+# new_cluster = w.clusters.create(
+#     cluster_name="sionna-rf-digital-twin",
+#     spark_version="16.4.x-scala2.13",
+#     node_type_id="g5.xlarge",
+#     driver_node_type_id="g5.xlarge",
+#     autoscale=AutoScale(min_workers=2, max_workers=8),
+#     autotermination_minutes=120,
+#     data_security_mode=DataSecurityMode.SINGLE_USER,
+#     runtime_engine=RuntimeEngine.STANDARD,
+#     aws_attributes=AwsAttributes(
+#         availability=AwsAvailability.SPOT_WITH_FALLBACK,
+#         first_on_demand=1,
+#         spot_bid_price_percent=100,
+#         zone_id="auto",
+#     ),
+# )
+# print(f"Created cluster {new_cluster.cluster_id} — attach this notebook to it.")
+
+# COMMAND ----------
+
+# MAGIC ## 0b. Install dependencies
 
 # COMMAND ----------
 
