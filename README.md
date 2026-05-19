@@ -213,14 +213,34 @@ Lakebase keeps an open `psycopg` connection on the app side, so the steady-state
 
 ### Concurrent user scaling
 
-| Concurrent app users | Lakebase | Lakehouse |
-| --- | --- | --- |
-| 1–5 | Instant, flat latency | First lookup cold-starts the warehouse; rest are warm |
-| 10–50 | Flat latency on CU_1 | Small warehouse may queue at the upper end → bump to Medium |
-| 50–200 | Bump to CU_2 for headroom | Need serverless + multi-cluster load balancing |
-| 200+ | CU_4 or sharded instances | Serverless auto-scaling + a connection-pool layer in front |
+Approximate median wall-clock for one app user clicking a cached preset (each request returns the same ~500 KB scene-render PNG + a few smaller blobs). **Warm backend, single cluster, no cold-start tax.** "Queue" = no failures, but tail latency degrades because requests sit waiting for a free slot. "Fail" = sustained timeouts or connection errors at this load.
 
-SQL warehouses cap concurrent queries per cluster (Small ≈ 10, Medium ≈ 20, Large ≈ 40). Past that, queries queue. Lakebase Postgres sustains 1 000+ short queries/sec per `CU_1` and scales near-linearly up the capacity tiers.
+#### Lakebase — capacity tier × concurrent app users
+
+| Capacity tier | **1 user** | **10** | **50** | **200** | **1 000** |
+| --- | --- | --- | --- | --- | --- |
+| **CU_1**  | 10 ms | 15 ms | 30 ms  | 100 ms | ~1 s, saturating |
+| **CU_2**  | 10 ms | 12 ms | 20 ms  | 50 ms  | ~300 ms |
+| **CU_4**  | 10 ms | 12 ms | 15 ms  | 30 ms  | ~150 ms |
+| **CU_8**  | 10 ms | 12 ms | 15 ms  | 25 ms  | ~80 ms |
+
+Postgres handles 1 000+ short queries/sec per `CU_1`; what limits you is the size of each blob being fetched. Doubling capacity roughly halves saturation latency.
+
+#### Lakehouse — warehouse size × concurrent app users
+
+| SQL warehouse size | **1 user** | **10** | **50** | **200** | **1 000** |
+| --- | --- | --- | --- | --- | --- |
+| **2X-Small** | 300 ms | 500 ms | queue, 5 s+ | fail | fail |
+| **Small**    | 300 ms | 400 ms | queue, 2–5 s | queue, 10 s+ | fail |
+| **Medium**   | 250 ms | 350 ms | 800 ms | queue, 5 s+ | fail |
+| **Large**    | 250 ms | 350 ms | 500 ms | 1–2 s | queue |
+| **X-Large**  | 250 ms | 300 ms | 400 ms | 700 ms | 3–5 s |
+| **2X-Large** | 250 ms | 300 ms | 400 ms | 500 ms | 1–2 s |
+| **3X-Large** | 250 ms | 300 ms | 350 ms | 450 ms | 800 ms |
+
+Per-cluster concurrent-query caps drive the queueing thresholds: Small ≈ 10, Medium ≈ 20, Large ≈ 40, X-Large ≈ 80, doubling each step. Past that, requests queue or fail.
+
+You can lift the ceiling by enabling **multi-cluster load balancing** on serverless warehouses (each extra cluster multiplies the concurrent-query cap) — at the cost of paying for the extra clusters during the burst window. A single CU_4 Lakebase instance still costs less than a Medium warehouse running 24/7, but the Lakehouse cluster scales to zero when idle. Pick by your traffic profile.
 
 ### Cost shape (rough monthly, AWS list)
 
