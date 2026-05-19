@@ -42,6 +42,65 @@ App/rf-digital-twin-app/
     └── sionna_compute_job.py             Notebook the app triggers on cache miss
 ```
 
+## Deploy in 10 minutes — quickstart
+
+After the setup notebook has succeeded (Lakebase + 19 cached presets exist), these are the remaining steps in execution order. Each one has a detailed section below; this block is for skimming and copy-paste.
+
+```bash
+# Prereqs: setup notebook done, databricks CLI authed, workspace Repo on the right branch.
+WS_USER="<your.email@databricks.com>"
+APP_SRC="/Workspace/Users/$WS_USER/sionna_simulation/App/rf-digital-twin-app"
+REPO_ID="<workspace-repo-id>"     # databricks repos list
+
+# 1. Create the live-render Job (see § Create the Job for the full JSON; substitute $WS_USER).
+JOB_ID=$(databricks jobs create --json @job.json | jq -r .job_id)
+echo "Job ID: $JOB_ID"
+
+# 2. Wire $JOB_ID into app.yaml on the branch you'll deploy from, push, sync workspace Repo.
+sed -i.bak "s|REPLACE_WITH_JOB_ID|$JOB_ID|" App/rf-digital-twin-app/app.yaml
+git add App/rf-digital-twin-app/app.yaml && git commit -m "wire SIONNA_JOB_ID" && git push
+databricks repos update $REPO_ID --branch main
+
+# 3. Create the App. The Lakebase binding makes a Postgres role for the app SP automatically.
+SP=$(databricks apps create --json @app.json --compute-size MEDIUM | jq -r .service_principal_client_id)
+echo "App SP: $SP"
+# Wait for compute ACTIVE
+while [ "$(databricks apps get rf-digital-twin --output json | jq -r .compute_status.state)" != "ACTIVE" ]; do sleep 12; done
+
+# 4. Grant the SP CAN_MANAGE_RUN on the job.
+databricks permissions update jobs $JOB_ID \
+  --json "{\"access_control_list\":[{\"service_principal_name\":\"$SP\",\"permission_level\":\"CAN_MANAGE_RUN\"}]}"
+
+# 5. Grant the SP Postgres access — run this cell in your setup notebook (lb_connect() is already defined):
+#
+#   with lb_connect() as conn, conn.cursor() as cur:
+#       cur.execute("""
+#           GRANT USAGE ON SCHEMA public TO PUBLIC;
+#           GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO PUBLIC;
+#           GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
+#           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO PUBLIC;
+#           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO PUBLIC;
+#       """)
+#       conn.commit()
+
+# 6. Deploy the app source.
+databricks apps deploy rf-digital-twin --source-code-path $APP_SRC
+
+# 7. Open the URL.
+databricks apps get rf-digital-twin --output json | jq -r .url
+```
+
+`job.json` and `app.json` referenced above are in [§ Create the Job](#3-create-the-live-render-job) and [§ Create the Databricks App](#4-create-the-databricks-app--bind-the-database) below.
+
+## Common gotchas
+
+- **SP doesn't exist until step 3** — Postgres `GRANT`s only work after the app is created. The Postgres role is auto-provisioned by the Lakebase binding, so the GRANT step is just permissioning the tables you created earlier as a different user.
+- **`'WorkspaceClient' object has no attribute 'database'`** — `databricks-sdk` in the app base image is 0.33.0; the Lakebase API namespace needs `>=0.55.0`. `requirements.txt` already pins it; just make sure your deploy is from the latest commit.
+- **Account-level OAuth quota** — Databricks accounts cap custom OAuth app integrations at 10 K. Each Databricks App creates one. If `databricks apps create` returns `QUOTA_EXCEEDED`, an admin needs to clean up unused integrations.
+- **Lakebase 10-instance per workspace cap** — the setup notebook will fail if you're at the cap. Delete an unused instance first.
+- **Workspace Repo branch drift** — `databricks apps deploy` snapshots the path at deploy time. If the workspace Repo is behind, you'll silently ship stale code. Always `databricks repos update <id> --branch <name>` before deploying.
+- **GPU cluster ≠ OptiX** — Sionna RT needs NVIDIA OptiX, which ships with `g4dn`/`g5`/`g6` instances but **not** CPU or ARM. Plain DBR 16.4 LTS on `g5.xlarge` works.
+
 ## One-time setup
 
 ### 1. Provision a GPU cluster
@@ -76,27 +135,7 @@ Open `setup/setup_rf_digital_twin.py` in the workspace, attach the GPU cluster, 
 
 Wall-clock: ~30–50 min for a fresh run on `g5.xlarge`; ~minutes on re-runs.
 
-### 3. Grant the app's SP Postgres access
-
-After the App is created (step 5), the runtime gives you a service principal. Lakebase auto-creates a Postgres role for it when the database resource is bound to the app, but it doesn't get permissions on tables created by another user.
-
-Easiest grant (in a notebook cell using `lb_connect()`):
-
-```python
-with lb_connect() as conn, conn.cursor() as cur:
-    cur.execute("""
-        GRANT USAGE ON SCHEMA public TO PUBLIC;
-        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO PUBLIC;
-        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO PUBLIC;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO PUBLIC;
-    """)
-    conn.commit()
-```
-
-For production, replace `PUBLIC` with the app SP's UUID and grant least-privilege.
-
-### 4. Create the live-render Job
+### 3. Create the live-render Job
 
 The app submits this Job whenever a user picks an off-menu config.
 
@@ -142,7 +181,9 @@ JSON
 
 Note the `job_id` it returns.
 
-### 5. Create the Databricks App + bind resources
+Note the returned `job_id`. Edit `app.yaml` so `SIONNA_JOB_ID` matches, commit, push, and sync the workspace Repo before continuing.
+
+### 4. Create the Databricks App + bind the database
 
 ```bash
 databricks apps create --json @- <<'JSON'
@@ -161,7 +202,13 @@ databricks apps create --json @- <<'JSON'
 JSON
 ```
 
-Once the App is created, capture its `service_principal_client_id` and grant it `CAN_MANAGE_RUN` on the job:
+Wait until `compute_status.state` is `ACTIVE`. Capture the `service_principal_client_id` — you'll need it for the next step. The Lakebase binding auto-populates `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER` in the app container and creates a Postgres role for the SP automatically; **`PGPASSWORD` is not populated** — `lakebase_client.py` mints a fresh OAuth token at runtime via `WorkspaceClient().database.generate_database_credential()` and caches it for 45 minutes.
+
+### 5. Grant the SP permissions
+
+Two things to grant, in either order:
+
+**a) `CAN_MANAGE_RUN` on the live-render Job** (so the app can submit jobs on cache miss):
 
 ```bash
 databricks permissions update jobs <job_id> --json '{
@@ -172,14 +219,30 @@ databricks permissions update jobs <job_id> --json '{
 }'
 ```
 
-Edit `app.yaml` to point `SIONNA_JOB_ID` at the job_id from step 4, then deploy:
+**b) Postgres access** on the tables your setup notebook created (the SP can connect but can't read tables owned by your personal user). Easiest: run this cell in the setup notebook where `lb_connect()` is already defined:
+
+```python
+with lb_connect() as conn, conn.cursor() as cur:
+    cur.execute("""
+        GRANT USAGE ON SCHEMA public TO PUBLIC;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO PUBLIC;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO PUBLIC;
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO PUBLIC;
+    """)
+    conn.commit()
+```
+
+For production, swap `PUBLIC` for the app SP's UUID and grant least-privilege.
+
+### 6. Deploy the app source
 
 ```bash
 databricks apps deploy rf-digital-twin \
   --source-code-path /Workspace/Users/<you>/sionna_simulation/App/rf-digital-twin-app
 ```
 
-The Lakebase resource binding auto-populates `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` in the app container. `PGPASSWORD` is **not** populated — `lakebase_client.py` mints a fresh OAuth token at runtime via `WorkspaceClient().database.generate_database_credential()` and caches it for 45 minutes.
+Open the URL — Config 1 auto-loads from the cache.
 
 ## What's in Lakebase
 
@@ -208,10 +271,10 @@ shiny run --reload app.py:app
 
 App starts on `http://localhost:8000`. Sionna isn't required locally — the app only reads `cached_renders` from Lakebase.
 
-## Troubleshooting
+## Runtime troubleshooting
 
-- **`fe_sendauth: no password supplied`** — `lakebase_client._generate_password()` couldn't mint a token. Check that `LAKEBASE_INSTANCE` env var is set in `app.yaml` and the app SP has `CAN_USE` on the Lakebase instance.
-- **`'WorkspaceClient' object has no attribute 'database'`** — `databricks-sdk` is too old. Pin `>=0.55.0` in `requirements.txt`.
-- **`libnvoptix.so.1 could not be loaded`** — Sionna ran on a non-GPU or non-OptiX runtime. Switch the setup notebook to DBR 16.4 on `g5.xlarge`.
-- **`Properties of ITU material 'marble' are not defined for this frequency`** — your scene uses a frequency below 1 GHz; ITU `marble` is only defined for 1–100 GHz. Keep frequencies ≥ 1.8 GHz on the etoile scene.
-- **Render submitted but Status tab shows nothing** — confirm the workspace Repo is on the latest branch (`databricks repos update <id> --branch main`) and the App was redeployed after the code change.
+Setup/deployment gotchas are in [Common gotchas](#common-gotchas) at the top of this file. The bullets here are things that surface **after** the app is running.
+
+- **`fe_sendauth: no password supplied`** — `lakebase_client._generate_password()` couldn't mint an OAuth token. Check that `LAKEBASE_INSTANCE` is set in `app.yaml` and the app SP has `CAN_USE` on the Lakebase instance.
+- **`Properties of ITU material 'marble' are not defined for this frequency`** — the user typed a frequency below 1 GHz. The etoile scene's ITU `marble` material is only defined for 1–100 GHz. Keep frequencies ≥ 1.8 GHz.
+- **App shows Config 1 on load but every Render goes to the live job** — workspace Repo wasn't synced to the deploy branch before `databricks apps deploy`. Re-run `databricks repos update <repo_id> --branch <name>` and redeploy.
