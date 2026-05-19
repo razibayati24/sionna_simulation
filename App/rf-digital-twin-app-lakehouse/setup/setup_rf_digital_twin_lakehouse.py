@@ -287,39 +287,90 @@ from pyspark.sql.types import (
 from pyspark.sql.functions import current_timestamp
 
 
+_SCENE_SCHEMA = StructType([
+    StructField("config_hash",      StringType(),  False),
+    StructField("name",             StringType(),  True),
+    StructField("num_rows_tx",      IntegerType(), True),
+    StructField("num_cols_tx",      IntegerType(), True),
+    StructField("num_rows_rx",      IntegerType(), True),
+    StructField("num_cols_rx",      IntegerType(), True),
+    StructField("frequency_hz",     DoubleType(),  True),
+    StructField("bandwidth_hz",     DoubleType(),  True),
+    StructField("max_depth",        IntegerType(), True),
+    StructField("samples_per_tx",   LongType(),    True),
+    StructField("cell_size_x",      DoubleType(),  True),
+    StructField("cell_size_y",      DoubleType(),  True),
+    StructField("pattern",          StringType(),  True),
+    StructField("polarization",     StringType(),  True),
+    StructField("num_user_samples", IntegerType(), True),
+    StructField("min_sinr_db",      DoubleType(),  True),
+    StructField("min_user_dist_m",  DoubleType(),  True),
+    StructField("max_user_dist_m",  DoubleType(),  True),
+    StructField("is_preset",        BooleanType(), True),
+])
+
+_CELLS_SCHEMA = StructType([
+    StructField("config_hash", StringType(),  False),
+    StructField("cell_id",     IntegerType(), False),
+    StructField("name",        StringType(),  True),
+    StructField("x",           DoubleType(),  True),
+    StructField("y",           DoubleType(),  True),
+    StructField("z",           DoubleType(),  True),
+    StructField("look_at_x",   DoubleType(),  True),
+    StructField("look_at_y",   DoubleType(),  True),
+    StructField("look_at_z",   DoubleType(),  True),
+    StructField("power_dbm",   DoubleType(),  True),
+])
+
+
 def upsert_scene_into_lakehouse(scene, cells, is_preset=True):
     config_hash = compute_config_hash(scene, cells)
 
-    # scene_configs
-    scene_row = {
-        "config_hash": config_hash,
-        "name": scene["name"],
-        "num_rows_tx": int(scene["num_rows_tx"]),
-        "num_cols_tx": int(scene["num_cols_tx"]),
-        "num_rows_rx": int(scene["num_rows_rx"]),
-        "num_cols_rx": int(scene["num_cols_rx"]),
-        "frequency_hz": float(scene["frequency_hz"]),
-        "bandwidth_hz": float(scene["bandwidth_hz"]),
-        "max_depth": int(scene["max_depth"]),
-        "samples_per_tx": int(scene["samples_per_tx"]),
-        "cell_size_x": float(scene["cell_size_x"]),
-        "cell_size_y": float(scene["cell_size_y"]),
-        "pattern": scene["pattern"],
-        "polarization": scene["polarization"],
-        "num_user_samples": int(scene["num_user_samples"]),
-        "min_sinr_db": float(scene["min_sinr_db"]),
-        "min_user_dist_m": float(scene["min_user_dist_m"]),
-        "max_user_dist_m": float(scene["max_user_dist_m"]),
-        "is_preset": bool(is_preset),
-    }
+    # scene_configs — tuple in _SCENE_SCHEMA field order
+    scene_row = (
+        config_hash,
+        scene["name"],
+        int(scene["num_rows_tx"]),
+        int(scene["num_cols_tx"]),
+        int(scene["num_rows_rx"]),
+        int(scene["num_cols_rx"]),
+        float(scene["frequency_hz"]),
+        float(scene["bandwidth_hz"]),
+        int(scene["max_depth"]),
+        int(scene["samples_per_tx"]),
+        float(scene["cell_size_x"]),
+        float(scene["cell_size_y"]),
+        scene["pattern"],
+        scene["polarization"],
+        int(scene["num_user_samples"]),
+        float(scene["min_sinr_db"]),
+        float(scene["min_user_dist_m"]),
+        float(scene["max_user_dist_m"]),
+        bool(is_preset),
+    )
     spark.sql(f"DELETE FROM {T_SCENE} WHERE config_hash = '{config_hash}'")
-    (spark.createDataFrame([scene_row])
+    (spark.createDataFrame([scene_row], schema=_SCENE_SCHEMA)
         .withColumn("created_at", current_timestamp())
         .write.mode("append").saveAsTable(T_SCENE))
 
     spark.sql(f"DELETE FROM {T_CELLS} WHERE config_hash = '{config_hash}'")
-    cell_rows = [{**c, "config_hash": config_hash} for c in cells]
-    spark.createDataFrame(cell_rows).write.mode("append").saveAsTable(T_CELLS)
+    cell_rows = [
+        (
+            config_hash,
+            int(c["cell_id"]),
+            c.get("name"),
+            float(c["x"]),
+            float(c["y"]),
+            float(c["z"]),
+            float(c["look_at_x"]),
+            float(c["look_at_y"]),
+            float(c["look_at_z"]),
+            float(c["power_dbm"]),
+        )
+        for c in cells
+    ]
+    (spark.createDataFrame(cell_rows, schema=_CELLS_SCHEMA)
+        .write.mode("append").saveAsTable(T_CELLS))
 
     return config_hash
 
