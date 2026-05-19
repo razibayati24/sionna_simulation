@@ -202,7 +202,14 @@ class SceneConfig:
 
 CONFIG_1 = SceneConfig("Config 1 (8x2 TX / 2x2 RX)",  8,  2, 2, 2)
 CONFIG_2 = SceneConfig("Config 2 (16x16 TX / 2x2 RX)", 16, 16, 2, 2)
-PRESETS = [CONFIG_1, CONFIG_2]
+
+# Extra "what-if" variants that get pre-cached so live demos can flip between
+# additional knobs without waiting on the Sionna job. Edit/extend freely.
+CONFIG_3 = SceneConfig("Config 3 (4x4 TX / 2x2 RX — middle ground)", 4, 4, 2, 2)
+CONFIG_4 = SceneConfig("Config 4 (8x2 TX, 2.6 GHz)",  8, 2, 2, 2, frequency_hz=2.6e9)
+CONFIG_5 = SceneConfig("Config 5 (16x16 TX, max depth=8)", 16, 16, 2, 2, max_depth=8)
+
+PRESETS = [CONFIG_1, CONFIG_2, CONFIG_3, CONFIG_4, CONFIG_5]
 
 # COMMAND ----------
 

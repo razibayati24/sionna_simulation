@@ -12,9 +12,14 @@ env:
   - name: "LAKEBASE_INSTANCE"
     value: "rf-digital-twin-pg"
 
-  # (Optional) Set when you wire up jobs/sionna_compute_job.py for live re-renders.
-  # - name: "SIONNA_JOB_ID"
-  #   valueFrom: "sionna-job-id"
+  # Databricks Job that renders custom configs (cache misses) on a GPU cluster.
+  - name: "SIONNA_JOB_ID"
+    value: "417222810044410"
+
+  # Workspace host — used to build clickable links into the Databricks Jobs UI
+  # for in-progress runs.
+  - name: "DATABRICKS_WORKSPACE_URL"
+    value: "https://fevm-cmegdemos.cloud.databricks.com"
 
 # Resource bindings (configure in the Databricks Apps UI when creating the app):
 #   1. Lakebase database  → instance: rf-digital-twin-pg, database: rf_digital_twin

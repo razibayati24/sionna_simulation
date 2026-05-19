@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 import traceback
 from typing import Any
 
@@ -24,8 +25,14 @@ from defaults import CONFIG_1, preset_cells
 # Configuration
 # ---------------------------------------------------------------------------
 
-SIONNA_JOB_ID = os.environ.get("SIONNA_JOB_ID")  # set if live re-renders enabled
+SIONNA_JOB_ID = os.environ.get("SIONNA_JOB_ID")
+DATABRICKS_WORKSPACE_URL = os.environ.get(
+    "DATABRICKS_WORKSPACE_URL",
+    f"https://{os.environ.get('DATABRICKS_HOST', '').rstrip('/')}",
+).rstrip("/")
 
+# Estimated wall-clock for a cold job cluster run (used for the wait ETA).
+JOB_ETA_SECONDS = 6 * 60
 
 PATTERN_CHOICES = ["tr38901", "iso", "dipole", "hw_dipole"]
 POLARIZATION_CHOICES = ["V", "H", "VH", "cross"]
@@ -187,7 +194,9 @@ def server(input, output, session):
         "cells": None,
         "data": None,           # cached_renders row
         "kpis": None,
-        "status": "Ready. Edit a config or pick a preset, then click Render.",
+        "run_id": None,         # job run currently in flight (or last one)
+        "started_at": None,     # epoch s when current job submitted; None if idle
+        "status": "Ready. Edit the config in the sidebar, then click Render.",
         "error": None,
     })
 
@@ -247,37 +256,61 @@ def server(input, output, session):
             await asyncio.to_thread(
                 lb.set_job_status, config_hash, "RUNNING", run_id, None,
             )
+            started_at = time.time()
             render_state.set({
                 **render_state(),
+                "run_id": run_id,
+                "started_at": started_at,
                 "status": (
-                    f"Submitted Sionna compute job (run_id={run_id}). "
-                    f"Polling cache every 10s…"
+                    f"Sionna compute job submitted "
+                    f"(run_id={run_id}). Spinning up GPU cluster…"
                 ),
             })
 
-            # Poll until the cache row appears, up to ~10 minutes.
-            for _ in range(60):
+            # Poll until the cache row appears, up to ~15 minutes.
+            for tick in range(90):
                 await asyncio.sleep(10)
                 cached = await _try_load_cached(config_hash)
                 if cached:
                     kpis = cached.get("kpis_json")
                     if isinstance(kpis, (bytes, str)):
                         kpis = json.loads(kpis)
+                    elapsed = time.time() - started_at
                     render_state.set({
                         **render_state(),
                         "data": cached,
                         "kpis": kpis,
+                        "run_id": run_id,
+                        "started_at": None,
                         "status": (
                             f"Job complete (run_id={run_id}) — render cached "
-                            f"in {cached.get('compute_seconds', 0):.1f}s."
+                            f"in {cached.get('compute_seconds', 0):.1f}s "
+                            f"(end-to-end {elapsed:.0f}s)."
                         ),
                     })
                     ui.update_navs("main_tabs", selected="Scene render")
                     return
 
+                # Progress message every ~30s
+                elapsed = int(time.time() - started_at)
+                remaining = max(JOB_ETA_SECONDS - elapsed, 30)
+                render_state.set({
+                    **render_state(),
+                    "run_id": run_id,
+                    "started_at": started_at,
+                    "status": (
+                        f"Sionna job running (run_id={run_id}). "
+                        f"Elapsed {elapsed//60}m{elapsed%60:02d}s, "
+                        f"estimated ~{remaining//60}m{remaining%60:02d}s remaining."
+                    ),
+                })
+
             render_state.set({
                 **render_state(),
-                "status": "Job still running. Refresh to check again.",
+                "status": (
+                    f"Polling timed out after 15 minutes. The job may still be "
+                    f"running — refresh the page or check run {run_id} in Databricks."
+                ),
             })
 
         except Exception as e:
@@ -414,19 +447,58 @@ def server(input, output, session):
     @render.ui
     def status_view():
         st = render_state()
-        items = [
-            ui.tags.p(ui.tags.strong("Status: "), st.get("status", "")),
-            ui.tags.p(ui.tags.strong("Config hash: "), st.get("config_hash") or "—"),
-        ]
+        is_running = st.get("started_at") is not None
+        run_id = st.get("run_id")
+
+        # Spinner + status banner.
+        status_text = st.get("status", "")
+        if is_running:
+            spinner = ui.tags.div(
+                ui.tags.div(
+                    "",
+                    style=(
+                        "border:3px solid #eee; border-top:3px solid #2c7be5; "
+                        "border-radius:50%; width:18px; height:18px; "
+                        "animation:spin 1s linear infinite; display:inline-block; "
+                        "vertical-align:middle; margin-right:8px;"
+                    ),
+                ),
+                ui.tags.span(status_text, style="vertical-align:middle;"),
+                style=(
+                    "padding:10px; background:#f4f8ff; border:1px solid #2c7be5; "
+                    "border-radius:4px; margin-bottom:8px;"
+                ),
+            )
+            # Inject keyframes for the spinner once.
+            css = ui.tags.style(
+                "@keyframes spin { from { transform: rotate(0deg); } "
+                "to { transform: rotate(360deg); } }"
+            )
+            items = [css, spinner]
+        else:
+            items = [ui.tags.p(ui.tags.strong("Status: "), status_text)]
+
+        # Run link
+        if run_id and DATABRICKS_WORKSPACE_URL:
+            run_url = f"{DATABRICKS_WORKSPACE_URL}/jobs/{SIONNA_JOB_ID}/runs/{run_id}"
+            items.append(ui.tags.p(
+                ui.tags.strong("Job run: "),
+                ui.tags.a(f"run_id={run_id}", href=run_url, target="_blank"),
+            ))
+
+        items.append(
+            ui.tags.p(ui.tags.strong("Config hash: "), st.get("config_hash") or "—")
+        )
+
         if st.get("error"):
             items.append(ui.tags.div(
                 ui.tags.strong("Error: "), st["error"],
-                style="color: #c00; padding: 8px; border: 1px solid #c00; border-radius: 4px;",
+                style="color:#c00; padding:8px; border:1px solid #c00; border-radius:4px;",
             ))
         if st.get("scene"):
             items.append(ui.h5("Current scene config"))
             items.append(ui.tags.pre(json.dumps(st["scene"], indent=2)))
-        return ui.div(*items, style="padding: 8px;")
+        return ui.div(*items, style="padding:8px;")
 
 
 app = App(app_ui, server)
