@@ -12,7 +12,6 @@ Pick the variant whose deployment fits your environment. **Both share the same U
 | --- | --- | --- |
 | Cache store | Lakebase Postgres (`bytea`) | Unity Catalog Delta (`BINARY`) via SQL warehouse |
 | Warm-hit latency | ~5–30 ms | ~200–400 ms |
-| Idle cost | ~$200/mo (CU_1 always-on) | $0 (warehouse scale-to-zero) |
 | Best for | OLTP-grade hot path, sustained traffic | Bursty traffic, cache-as-data-product, UC-only stack |
 | Deployment guide | [`App/rf-digital-twin-app/README.md`](App/rf-digital-twin-app/README.md) | [`App/rf-digital-twin-app-lakehouse/README.md`](App/rf-digital-twin-app-lakehouse/README.md) |
 
@@ -225,7 +224,6 @@ SQL warehouses cap concurrent queries per cluster (Small ≈ 10, Medium ≈ 20, 
 
 | Traffic pattern | Lakebase | Lakehouse (serverless SQL) |
 | --- | --- | --- |
-| Idle / no traffic | **~$200/mo** (CU_1 always-on) | **~$0** (warehouse scaled to zero) |
 | Light, intermittent (~10 req/hr) | ~$200/mo | ~$30–80/mo (occasional wake-ups) |
 | Steady (~100 req/hr) | ~$200/mo | ~$200–400/mo (warehouse stays warm) |
 | Heavy (1 000+ req/hr) | ~$200–400/mo (size up if needed) | ~$500–1 500/mo (warm + scaled) |
@@ -243,7 +241,7 @@ Pick **Lakebase** when:
 
 Pick **Lakehouse** when:
 - The cached renders are *also* a data product that analysts will query directly (BI dashboards, surrogate training, drift monitoring).
-- Traffic is intermittent and idle cost matters more than tail latency.
+- Traffic is intermittent and bursty more than tail latency matters.
 - You'd rather minimise managed-service surface area (everything stays in UC).
 - Time-travel, column-level governance, or built-in lineage are hard requirements.
 
