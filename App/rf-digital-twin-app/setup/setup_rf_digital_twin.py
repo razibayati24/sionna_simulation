@@ -111,7 +111,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, asdict
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import matplotlib as mpl
@@ -195,21 +195,64 @@ class SceneConfig:
     min_sinr_db: float = 3.0
     min_user_dist_m: float = 10.0
     max_user_dist_m: float = 200.0
+    # When set, every cell's power_dbm gets replaced with this value.
+    cell_power_override_dbm: Optional[float] = None
 
     def to_dict(self):
         return asdict(self)
 
 
-CONFIG_1 = SceneConfig("Config 1 (8x2 TX / 2x2 RX)",  8,  2, 2, 2)
-CONFIG_2 = SceneConfig("Config 2 (16x16 TX / 2x2 RX)", 16, 16, 2, 2)
+def cells_for_preset(cfg: SceneConfig, base_cells: list[dict]) -> list[dict]:
+    """Apply preset-level overrides (e.g. uniform TX power) to the cell list."""
+    cells = [dict(c) for c in base_cells]
+    if cfg.cell_power_override_dbm is not None:
+        for c in cells:
+            c["power_dbm"] = float(cfg.cell_power_override_dbm)
+    return cells
 
-# Extra "what-if" variants that get pre-cached so live demos can flip between
-# additional knobs without waiting on the Sionna job. Edit/extend freely.
-CONFIG_3 = SceneConfig("Config 3 (4x4 TX / 2x2 RX — middle ground)", 4, 4, 2, 2)
-CONFIG_4 = SceneConfig("Config 4 (8x2 TX, 2.6 GHz)",  8, 2, 2, 2, frequency_hz=2.6e9)
-CONFIG_5 = SceneConfig("Config 5 (16x16 TX, max depth=8)", 16, 16, 2, 2, max_depth=8)
 
-PRESETS = [CONFIG_1, CONFIG_2, CONFIG_3, CONFIG_4, CONFIG_5]
+# Story A — Antenna densification
+CONFIG_DENS_2X2  = SceneConfig("A · Densification — 2×2 TX (baseline)",   2,  2, 2, 2)
+CONFIG_DENS_4X4  = SceneConfig("A · Densification — 4×4 TX",              4,  4, 2, 2)
+CONFIG_1         = SceneConfig("A · Densification — 8×2 TX (Config 1)",   8,  2, 2, 2)
+CONFIG_DENS_8X8  = SceneConfig("A · Densification — 8×8 TX",              8,  8, 2, 2)
+CONFIG_2         = SceneConfig("A · Densification — 16×16 TX (Config 2)", 16, 16, 2, 2)
+CONFIG_DENS_32X8 = SceneConfig("A · Densification — 32×8 TX (elongated)", 32, 8, 2, 2)
+
+# Story B — Frequency band ladder (8×2 TX held constant)
+CONFIG_FREQ_700M = SceneConfig("B · Frequency — 8×2 @ 700 MHz",  8, 2, 2, 2, frequency_hz=7e8,    bandwidth_hz=2e7)
+CONFIG_FREQ_2P6G = SceneConfig("B · Frequency — 8×2 @ 2.6 GHz",  8, 2, 2, 2, frequency_hz=2.6e9,  bandwidth_hz=2e7)
+CONFIG_FREQ_3P5G = SceneConfig("B · Frequency — 8×2 @ 3.5 GHz",  8, 2, 2, 2, frequency_hz=3.5e9,  bandwidth_hz=1e8)
+CONFIG_FREQ_39G  = SceneConfig("B · Frequency — 8×2 @ 39 GHz",   8, 2, 2, 2, frequency_hz=3.9e10, bandwidth_hz=4e8)
+
+# Story C — Antenna pattern (16×16 TX held constant)
+CONFIG_PAT_ISO    = SceneConfig("C · Pattern — 16×16 isotropic", 16, 16, 2, 2, pattern="iso")
+CONFIG_PAT_DIPOLE = SceneConfig("C · Pattern — 16×16 dipole",    16, 16, 2, 2, pattern="dipole")
+
+# Story D — Polarization (16×16 TX held constant)
+CONFIG_POL_VH = SceneConfig("D · Polarization — 16×16 cross (VH)", 16, 16, 2, 2, polarization="VH")
+
+# Story E — Power level (uniform across cells)
+CONFIG_PWR_LOW  = SceneConfig("E · Power — 16×16 @ 38 dBm", 16, 16, 2, 2, cell_power_override_dbm=38.0)
+CONFIG_PWR_HIGH = SceneConfig("E · Power — 16×16 @ 50 dBm", 16, 16, 2, 2, cell_power_override_dbm=50.0)
+
+# Story F — Bandwidth (16×16 TX held constant)
+CONFIG_BW_20M  = SceneConfig("F · Bandwidth — 16×16 @ 20 MHz",  16, 16, 2, 2, bandwidth_hz=2e7)
+CONFIG_BW_400M = SceneConfig("F · Bandwidth — 16×16 @ 400 MHz", 16, 16, 2, 2, bandwidth_hz=4e8)
+
+# Story G — Ray tracing fidelity (16×16 TX held constant)
+CONFIG_DEPTH_3 = SceneConfig("G · Fidelity — 16×16 max_depth=3", 16, 16, 2, 2, max_depth=3)
+CONFIG_DEPTH_8 = SceneConfig("G · Fidelity — 16×16 max_depth=8", 16, 16, 2, 2, max_depth=8)
+
+PRESETS = [
+    CONFIG_DENS_2X2, CONFIG_DENS_4X4, CONFIG_1, CONFIG_DENS_8X8, CONFIG_2, CONFIG_DENS_32X8,
+    CONFIG_FREQ_700M, CONFIG_FREQ_2P6G, CONFIG_FREQ_3P5G, CONFIG_FREQ_39G,
+    CONFIG_PAT_ISO, CONFIG_PAT_DIPOLE,
+    CONFIG_POL_VH,
+    CONFIG_PWR_LOW, CONFIG_PWR_HIGH,
+    CONFIG_BW_20M, CONFIG_BW_400M,
+    CONFIG_DEPTH_3, CONFIG_DEPTH_8,
+]
 
 # COMMAND ----------
 
@@ -635,32 +678,59 @@ def run_simulation(scene_cfg: dict, cells: list[dict]) -> dict[str, Any]:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Read cell configs from UC + run Sionna for Config 1 and Config 2
+# MAGIC ## 9. Read cell configs from UC + run Sionna for every preset
+# MAGIC
+# MAGIC Loops through `PRESETS`, applies any preset-level cell overrides
+# MAGIC (e.g. uniform TX power), and runs Sionna RT for each. Skips configs
+# MAGIC whose hash is already cached in Lakebase — so re-running this cell
+# MAGIC after adding new presets only renders the new ones.
 
 # COMMAND ----------
 
 # Pull the canonical cell layout out of UC so we can edit there later.
-cells_from_uc = (
+base_cells = (
     spark.table(CELL_TABLE)
     .orderBy("cell_id")
     .toPandas()
     .to_dict(orient="records")
 )
-print(f"Loaded {len(cells_from_uc)} cells from {CELL_TABLE}")
+print(f"Loaded {len(base_cells)} cells from {CELL_TABLE}")
 
 # COMMAND ----------
+
+def _is_already_cached(config_hash: str) -> bool:
+    """True when a non-empty cached_renders row exists for this hash."""
+    with lb_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT length(scene_render_png) AS n "
+            "FROM cached_renders WHERE config_hash = %s",
+            (config_hash,),
+        )
+        row = cur.fetchone()
+    return bool(row and row["n"] and row["n"] > 10_000)
+
 
 precompute_summary = []
 
 for cfg in PRESETS:
     scene_cfg = cfg.to_dict()
-    scene_id, config_hash = upsert_scene(scene_cfg, cells_from_uc, is_preset=True)
+    cells = cells_for_preset(cfg, base_cells)
+    scene_id, config_hash = upsert_scene(scene_cfg, cells, is_preset=True)
     print(f"\n=== {cfg.name} ===")
     print(f"  scene_id     = {scene_id}")
     print(f"  config_hash  = {config_hash}")
-    print(f"  Running Sionna RT (samples_per_tx={SAMPLES_PER_TX:,})…")
 
-    results = run_simulation(scene_cfg, cells_from_uc)
+    if _is_already_cached(config_hash):
+        print("  Already cached — skipping Sionna run.")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "status": "skipped (already cached)",
+        })
+        continue
+
+    print(f"  Running Sionna RT (samples_per_tx={SAMPLES_PER_TX:,})…")
+    results = run_simulation(scene_cfg, cells)
     write_render(config_hash, results)
 
     print(f"  Done in {results['compute_seconds']:.1f}s, cached to Lakebase.")
@@ -668,10 +738,12 @@ for cfg in PRESETS:
         "name": cfg.name,
         "config_hash": config_hash,
         "compute_seconds": results["compute_seconds"],
+        "status": "rendered",
         "kpis": json.loads(results["kpis_json"]),
     })
 
-print("\nAll presets cached.")
+print(f"\nFinished. {sum(1 for s in precompute_summary if s.get('status') == 'rendered')} new renders, "
+      f"{sum(1 for s in precompute_summary if s.get('status') == 'skipped (already cached)')} skipped.")
 display(pd.DataFrame(precompute_summary))
 
 # COMMAND ----------
