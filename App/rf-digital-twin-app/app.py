@@ -24,7 +24,6 @@ from defaults import CONFIG_1, CONFIG_2, PRESETS, preset_cells
 # Configuration
 # ---------------------------------------------------------------------------
 
-NUM_CELLS = 7
 SIONNA_JOB_ID = os.environ.get("SIONNA_JOB_ID")  # set if live re-renders enabled
 
 
@@ -75,27 +74,14 @@ def _collect_scene(input) -> dict:
     }
 
 
-def _collect_cells(input) -> list[dict]:
-    cells = []
-    for i in range(NUM_CELLS):
-        cells.append({
-            "cell_id": i,
-            "name": f"tx{i}",
-            "x":         float(input[f"cell{i}_x"]()),
-            "y":         float(input[f"cell{i}_y"]()),
-            "z":         float(input[f"cell{i}_z"]()),
-            "look_at_x": float(input[f"cell{i}_lax"]()),
-            "look_at_y": float(input[f"cell{i}_lay"]()),
-            "look_at_z": float(input[f"cell{i}_laz"]()),
-            "power_dbm": float(input[f"cell{i}_pow"]()),
-        })
-    return cells
+def _collect_cells() -> list[dict]:
+    """The 7-cell layout is fixed (matches what's seeded in Lakebase)."""
+    return preset_cells()
 
 
 def _apply_preset(preset_key: str) -> None:
-    """Push a preset into the input controls."""
+    """Push a preset into the sidebar input controls."""
     cfg = PRESETS[preset_key]
-    cells = preset_cells()
 
     ui.update_numeric("num_rows_tx", value=cfg.num_rows_tx)
     ui.update_numeric("num_cols_tx", value=cfg.num_cols_tx)
@@ -114,15 +100,6 @@ def _apply_preset(preset_key: str) -> None:
     ui.update_numeric("min_sinr_db", value=cfg.min_sinr_db)
     ui.update_numeric("min_user_dist_m", value=cfg.min_user_dist_m)
     ui.update_numeric("max_user_dist_m", value=cfg.max_user_dist_m)
-
-    for i, c in enumerate(cells):
-        ui.update_numeric(f"cell{i}_x",   value=c["x"])
-        ui.update_numeric(f"cell{i}_y",   value=c["y"])
-        ui.update_numeric(f"cell{i}_z",   value=c["z"])
-        ui.update_numeric(f"cell{i}_lax", value=c["look_at_x"])
-        ui.update_numeric(f"cell{i}_lay", value=c["look_at_y"])
-        ui.update_numeric(f"cell{i}_laz", value=c["look_at_z"])
-        ui.update_numeric(f"cell{i}_pow", value=c["power_dbm"])
 
 
 def _submit_databricks_job(config_hash: str, scene_cfg: dict, cells: list[dict]) -> int:
@@ -150,21 +127,6 @@ def _submit_databricks_job(config_hash: str, scene_cfg: dict, cells: list[dict])
 # UI
 # ---------------------------------------------------------------------------
 
-def _cell_row_inputs(i: int, c: dict) -> ui.Tag:
-    """One row of inputs for cell i."""
-    return ui.row(
-        ui.column(1, ui.tags.div(f"tx{i}", style="padding-top: 32px; font-weight: bold;")),
-        ui.column(1, ui.input_numeric(f"cell{i}_x",   "x",   value=c["x"],   step=1)),
-        ui.column(1, ui.input_numeric(f"cell{i}_y",   "y",   value=c["y"],   step=1)),
-        ui.column(1, ui.input_numeric(f"cell{i}_z",   "z",   value=c["z"],   step=1)),
-        ui.column(1, ui.input_numeric(f"cell{i}_lax", "look x", value=c["look_at_x"], step=1)),
-        ui.column(1, ui.input_numeric(f"cell{i}_lay", "look y", value=c["look_at_y"], step=1)),
-        ui.column(1, ui.input_numeric(f"cell{i}_laz", "look z", value=c["look_at_z"], step=1)),
-        ui.column(2, ui.input_numeric(f"cell{i}_pow", "power (dBm)", value=c["power_dbm"], step=1)),
-    )
-
-
-_initial_cells = preset_cells()
 _initial_scene = CONFIG_1
 
 
@@ -234,12 +196,6 @@ def _sidebar() -> ui.Tag:
 app_ui = ui.page_sidebar(
     _sidebar(),
     ui.navset_card_tab(
-        ui.nav_panel(
-            "Cells",
-            ui.h4("Per-TX configuration (7 cells around the Arc de Triomphe)"),
-            ui.p("Edit positions, look-at points, and TX power. Coordinates are in scene meters."),
-            *[_cell_row_inputs(i, _initial_cells[i]) for i in range(NUM_CELLS)],
-        ),
         ui.nav_panel("Scene render",     ui.output_ui("scene_render_view")),
         ui.nav_panel("SINR association", ui.output_ui("sinr_map_view")),
         ui.nav_panel("Users → TX",       ui.output_ui("association_view")),
@@ -274,7 +230,7 @@ def server(input, output, session):
     async def _do_render() -> None:
         try:
             scene_cfg = _collect_scene(input)
-            cells = _collect_cells(input)
+            cells = _collect_cells()
             config_hash = lb.compute_config_hash(scene_cfg, cells)
 
             render_state.set({
