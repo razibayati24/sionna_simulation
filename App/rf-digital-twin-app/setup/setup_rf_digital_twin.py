@@ -765,7 +765,20 @@ if n_failed:
     for s in precompute_summary:
         if s.get('status') == 'FAILED':
             print(f"  - {s['name']}: {s['error']}")
-display(pd.DataFrame(precompute_summary))
+
+# Flatten for display: nested dicts and missing columns trip Spark's type
+# inference. Project to a consistent string-only schema.
+display_rows = []
+for s in precompute_summary:
+    display_rows.append({
+        "name":            s.get("name", ""),
+        "config_hash":     s.get("config_hash", ""),
+        "status":          s.get("status", ""),
+        "compute_seconds": str(s.get("compute_seconds", "")),
+        "kpis_summary":    json.dumps(s.get("kpis"), default=str) if s.get("kpis") else "",
+        "error":           s.get("error", ""),
+    })
+display(pd.DataFrame(display_rows))
 
 # COMMAND ----------
 
