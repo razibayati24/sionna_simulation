@@ -185,8 +185,16 @@ def _sidebar() -> ui.Tag:
             "render_btn", "Render scene", class_="btn-success",
             style="width: 100%;",
         ),
-        # Cancel slot — rendered conditionally on a pending job.
-        ui.output_ui("cancel_slot"),
+        ui.input_action_button(
+            "cancel_btn", "Cancel pending job", class_="btn-outline-danger",
+            style="width: 100%; margin-top: 6px;",
+            disabled=True,
+        ),
+        ui.tags.div(
+            "Active only while a Sionna job is running for an off-menu config. "
+            "Cached presets always load instantly.",
+            style="font-size: 11px; color: #888; margin-top: 4px;",
+        ),
         width=340,
     )
 
@@ -445,22 +453,15 @@ def server(input, output, session):
         await _do_render()
 
     # ------------------------------------------------------------------
-    # Cancel button — only rendered when a job is pending.
+    # Cancel button — always in the sidebar; enabled only when a job is pending.
     # ------------------------------------------------------------------
-    @render.ui
-    def cancel_slot():
-        if not render_state().get("pending_run_id"):
-            return ui.div()
-        return ui.div(
-            ui.input_action_button(
-                "cancel_btn", "Cancel pending job", class_="btn-danger",
-                style="width: 100%; margin-top: 6px;",
-            ),
-            ui.tags.div(
-                "A Sionna job is running in the background. "
-                "Cancelling stops the cluster; cached presets still load instantly.",
-                style="font-size: 11px; color: #888; margin-top: 4px;",
-            ),
+    @reactive.effect
+    def _toggle_cancel_enabled():
+        has_pending = bool(render_state().get("pending_run_id"))
+        ui.update_action_button(
+            "cancel_btn",
+            label="Cancel pending job" if has_pending else "No job to cancel",
+            disabled=not has_pending,
         )
 
     # ------------------------------------------------------------------
