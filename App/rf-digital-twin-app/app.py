@@ -446,59 +446,89 @@ def server(input, output, session):
 
     @render.ui
     def status_view():
-        st = render_state()
-        is_running = st.get("started_at") is not None
-        run_id = st.get("run_id")
+        try:
+            st = render_state()
+            is_running = bool(st.get("started_at"))
+            run_id = st.get("run_id")
+            status_text = st.get("status") or "(no status)"
+            config_hash = st.get("config_hash") or "—"
+            error_text = st.get("error")
+            scene = st.get("scene")
 
-        # Spinner + status banner.
-        status_text = st.get("status", "")
-        if is_running:
-            spinner = ui.tags.div(
-                ui.tags.div(
-                    "",
+            blocks: list = []
+
+            # 1. Status banner (with spinner if a job is running).
+            if is_running:
+                blocks.append(ui.tags.style(
+                    "@keyframes rfspin{from{transform:rotate(0deg)}"
+                    "to{transform:rotate(360deg)}}"
+                    ".rf-spinner{border:3px solid #eee;border-top:3px solid #2c7be5;"
+                    "border-radius:50%;width:18px;height:18px;"
+                    "animation:rfspin 1s linear infinite;"
+                    "display:inline-block;vertical-align:middle;margin-right:8px}"
+                ))
+                blocks.append(ui.tags.div(
+                    ui.tags.div(class_="rf-spinner"),
+                    ui.tags.span(status_text),
                     style=(
-                        "border:3px solid #eee; border-top:3px solid #2c7be5; "
-                        "border-radius:50%; width:18px; height:18px; "
-                        "animation:spin 1s linear infinite; display:inline-block; "
-                        "vertical-align:middle; margin-right:8px;"
+                        "padding:10px;background:#f4f8ff;border:1px solid #2c7be5;"
+                        "border-radius:4px;margin-bottom:12px;"
                     ),
-                ),
-                ui.tags.span(status_text, style="vertical-align:middle;"),
-                style=(
-                    "padding:10px; background:#f4f8ff; border:1px solid #2c7be5; "
-                    "border-radius:4px; margin-bottom:8px;"
-                ),
-            )
-            # Inject keyframes for the spinner once.
-            css = ui.tags.style(
-                "@keyframes spin { from { transform: rotate(0deg); } "
-                "to { transform: rotate(360deg); } }"
-            )
-            items = [css, spinner]
-        else:
-            items = [ui.tags.p(ui.tags.strong("Status: "), status_text)]
+                ))
+            else:
+                blocks.append(ui.tags.div(
+                    ui.tags.strong("Status: "),
+                    status_text,
+                    style="padding:10px;background:#f8f9fa;border-radius:4px;margin-bottom:12px;",
+                ))
 
-        # Run link
-        if run_id and DATABRICKS_WORKSPACE_URL:
-            run_url = f"{DATABRICKS_WORKSPACE_URL}/jobs/{SIONNA_JOB_ID}/runs/{run_id}"
-            items.append(ui.tags.p(
-                ui.tags.strong("Job run: "),
-                ui.tags.a(f"run_id={run_id}", href=run_url, target="_blank"),
+            # 2. Job run link.
+            if run_id and SIONNA_JOB_ID and DATABRICKS_WORKSPACE_URL:
+                run_url = f"{DATABRICKS_WORKSPACE_URL}/jobs/{SIONNA_JOB_ID}/runs/{run_id}"
+                blocks.append(ui.tags.p(
+                    ui.tags.strong("Job run: "),
+                    ui.tags.a(f"run_id={run_id}", href=run_url, target="_blank",
+                              rel="noopener"),
+                ))
+
+            # 3. Config hash.
+            blocks.append(ui.tags.p(
+                ui.tags.strong("Config hash: "),
+                ui.tags.code(config_hash),
             ))
 
-        items.append(
-            ui.tags.p(ui.tags.strong("Config hash: "), st.get("config_hash") or "—")
-        )
+            # 4. Error.
+            if error_text:
+                blocks.append(ui.tags.div(
+                    ui.tags.strong("Error: "), error_text,
+                    style=(
+                        "color:#c00;padding:10px;border:1px solid #c00;"
+                        "border-radius:4px;margin:12px 0;"
+                    ),
+                ))
 
-        if st.get("error"):
-            items.append(ui.tags.div(
-                ui.tags.strong("Error: "), st["error"],
-                style="color:#c00; padding:8px; border:1px solid #c00; border-radius:4px;",
-            ))
-        if st.get("scene"):
-            items.append(ui.h5("Current scene config"))
-            items.append(ui.tags.pre(json.dumps(st["scene"], indent=2)))
-        return ui.div(*items, style="padding:8px;")
+            # 5. Scene dump.
+            if scene:
+                try:
+                    scene_json = json.dumps(scene, indent=2, default=str)
+                except Exception as e:
+                    scene_json = f"(could not serialize scene: {e})"
+                blocks.append(ui.h5("Current scene config"))
+                blocks.append(ui.tags.pre(
+                    scene_json,
+                    style=(
+                        "background:#f8f9fa;padding:10px;border-radius:4px;"
+                        "font-size:12px;max-height:400px;overflow:auto;"
+                    ),
+                ))
+
+            return ui.div(*blocks, style="padding:8px;")
+        except Exception as e:
+            import traceback as _tb
+            return ui.tags.pre(
+                f"status_view error: {e}\n\n{_tb.format_exc()}",
+                style="color:#c00;padding:10px;",
+            )
 
 
 app = App(app_ui, server)
