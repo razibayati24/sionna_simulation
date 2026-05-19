@@ -7,23 +7,17 @@ command: [
   "app.py:app"
 ]
 
-env:
-  # Lakebase Postgres — values come from the Databricks Apps resource binding.
-  - name: "PGHOST"
-    valueFrom: "lakebase-host"
-  - name: "PGPORT"
-    valueFrom: "lakebase-port"
-  - name: "PGDATABASE"
-    valueFrom: "lakebase-database"
-  - name: "PGUSER"
-    valueFrom: "lakebase-user"
-  - name: "PGPASSWORD"
-    valueFrom: "lakebase-password"
-  - name: "PGSSLMODE"
-    value: "require"
-
-  # Optional — set to a Databricks Job ID that runs jobs/sionna_compute_job.py
-  # to enable live re-renders for custom configurations. Leave unset to allow
-  # only cached Config 1 / Config 2.
-  - name: "SIONNA_JOB_ID"
-    valueFrom: "sionna-job-id"
+# Resource bindings (configure in the Databricks Apps UI when creating the app):
+#
+#   1. Lakebase database  → instance: rf-digital-twin-pg, database: rf_digital_twin
+#      This automatically populates the following env vars in the container:
+#        PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PGSSLMODE, PGAPPNAME
+#      No manual env mapping is needed for these.
+#
+#   2. (Optional) Secret  → key: sionna-job-id  (only if you wire up
+#      jobs/sionna_compute_job.py so the app can submit live re-renders).
+#      Uncomment the env entry below after creating that secret.
+#
+# env:
+#   - name: SIONNA_JOB_ID
+#     valueFrom: "sionna-job-id"
