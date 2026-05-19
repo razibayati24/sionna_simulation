@@ -44,24 +44,42 @@ def _pick(*names: str, default: str | None = None) -> str | None:
     return default
 
 
-def _generate_password() -> str:
-    """Mint a fresh OAuth token for Lakebase via the Databricks SDK.
+_INSTANCE_CACHE: dict[str, Any] = {"host": None, "name": None}
 
-    Databricks Apps populate PGHOST/PGUSER/PGDATABASE from the bound Lakebase
-    resource but do not provide PGPASSWORD — the app must generate its own
-    credential using the SP's identity.
+
+def _ws_client():
+    """Cached WorkspaceClient (local import keeps the module light)."""
+    from databricks.sdk import WorkspaceClient
+    return WorkspaceClient()
+
+
+def _instance_host() -> str:
+    """Resolve the Lakebase read-write hostname from LAKEBASE_INSTANCE.
+
+    Apps get this via PGHOST from the resource binding; jobs and notebooks
+    don't, so we ask the SDK.
     """
+    instance_name = _pick("LAKEBASE_INSTANCE", default=_DEFAULT_INSTANCE_NAME)
+    if _INSTANCE_CACHE["name"] == instance_name and _INSTANCE_CACHE["host"]:
+        return _INSTANCE_CACHE["host"]
+    inst = _ws_client().database.get_database_instance(name=instance_name)
+    _INSTANCE_CACHE["name"] = instance_name
+    _INSTANCE_CACHE["host"] = inst.read_write_dns
+    return inst.read_write_dns
+
+
+def _current_user() -> str:
+    return _ws_client().current_user.me().user_name
+
+
+def _generate_password() -> str:
+    """Mint a fresh OAuth token for Lakebase via the Databricks SDK."""
     now = time.time()
     if _TOKEN_CACHE["token"] and now < _TOKEN_CACHE["expires_at"]:
         return _TOKEN_CACHE["token"]
 
     instance_name = _pick("LAKEBASE_INSTANCE", default=_DEFAULT_INSTANCE_NAME)
-    # Local import so the module remains importable without the SDK installed
-    # (e.g. from the precompute notebook on a vanilla cluster).
-    from databricks.sdk import WorkspaceClient
-
-    w = WorkspaceClient()
-    cred = w.database.generate_database_credential(
+    cred = _ws_client().database.generate_database_credential(
         request_id=str(uuid.uuid4()),
         instance_names=[instance_name],
     )
@@ -71,25 +89,23 @@ def _generate_password() -> str:
 
 
 def _conn_kwargs() -> dict:
-    """Build psycopg connect kwargs from environment.
+    """Build psycopg connect kwargs.
 
-    Databricks Apps with a Lakebase resource binding exposes:
-      PGHOST, PGPORT, PGDATABASE, PGUSER  (PGPASSWORD is NOT set).
-    The password is minted on demand via the SDK. For local dev, set
-    PGPASSWORD/LAKEBASE_PASSWORD manually to skip the SDK call.
+    Resolution order:
+      PGHOST     — env var (set by Databricks Apps binding) or SDK lookup of
+                   LAKEBASE_INSTANCE.
+      PGUSER     — env var, else current Databricks principal (job run-as).
+      PGDATABASE — env var, else "rf_digital_twin".
+      PGPASSWORD — env var (local dev), else OAuth token from SDK.
     """
-    host = _pick("PGHOST", "LAKEBASE_HOST")
-    if not host:
-        raise RuntimeError(
-            "Lakebase connection not configured. Set PGHOST/PGUSER/PGDATABASE "
-            "(or LAKEBASE_* equivalents) in the app environment."
-        )
+    host = _pick("PGHOST", "LAKEBASE_HOST") or _instance_host()
+    user = _pick("PGUSER", "LAKEBASE_USER") or _current_user()
     password = _pick("PGPASSWORD", "LAKEBASE_PASSWORD") or _generate_password()
     return dict(
         host=host,
         port=int(_pick("PGPORT", "LAKEBASE_PORT", default="5432")),
         dbname=_pick("PGDATABASE", "LAKEBASE_DATABASE", default="rf_digital_twin"),
-        user=_pick("PGUSER", "LAKEBASE_USER"),
+        user=user,
         password=password,
         sslmode=_pick("PGSSLMODE", "LAKEBASE_SSLMODE", default="require"),
     )
