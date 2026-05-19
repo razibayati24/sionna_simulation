@@ -1,68 +1,70 @@
 # Sionna RF Digital Twin on Databricks
 
-A reference implementation of NVIDIA Sionna RT as an interactive Databricks App, backed by Lakebase Postgres for cached renders and a Databricks Job for on-demand custom configurations. Built around the Arc de Triomphe (etoile) scene with a 7-cell mmWave network — but the scaling characteristics matter long before you hit 100+ cells, so this README documents where the time goes and how to get to production scale.
-
-For app-specific deployment instructions, see [`App/rf-digital-twin-app/README.md`](App/rf-digital-twin-app/README.md). For the original notebook that the app is built around, see [`rf_planning_optimization/simulation_RT_light.ipynb`](rf_planning_optimization/simulation_RT_light.ipynb).
+A reference implementation of NVIDIA Sionna RT as an interactive Databricks App. Edit a cell-network configuration in a Shiny sidebar; instantly see the resulting scene render, SINR coverage map, user-to-TX association, and SINR/RSS CDFs. Built around the Arc de Triomphe (etoile) scene with a 7-cell mmWave network — but the scaling characteristics matter long before you hit 100+ cells, so this README documents where the time goes and how to get to production scale.
 
 ---
 
-## What this project is
+## Two app variants
 
-A digital twin of an RF network running in Databricks. Edit antenna parameters, ray-tracing settings, or per-TX positions / power; render the scene with Sionna RT; visualise the coverage (scene render, SINR map, user-to-TX association, SINR/RSS CDFs); compare configurations side-by-side.
+Pick the variant whose deployment fits your environment. **Both share the same UI, the same Sionna pipeline, and the same 19-preset cache** (`config_hash` is computed identically).
 
-Three components:
+| | [Lakebase variant](App/rf-digital-twin-app/README.md) | [Lakehouse variant](App/rf-digital-twin-app-lakehouse/README.md) |
+| --- | --- | --- |
+| Cache store | Lakebase Postgres (`bytea`) | Unity Catalog Delta (`BINARY`) via SQL warehouse |
+| Warm-hit latency | ~5–30 ms | ~200–400 ms |
+| Idle cost | ~$200/mo (CU_1 always-on) | $0 (warehouse scale-to-zero) |
+| Best for | OLTP-grade hot path, sustained traffic | Bursty traffic, cache-as-data-product, UC-only stack |
+| Deployment guide | [`App/rf-digital-twin-app/README.md`](App/rf-digital-twin-app/README.md) | [`App/rf-digital-twin-app-lakehouse/README.md`](App/rf-digital-twin-app-lakehouse/README.md) |
 
-1. **`App/rf-digital-twin-app/`** — Shiny app deployed via Databricks Apps. Reads cached renders from Lakebase. On cache miss, submits the Sionna compute job.
-2. **`App/rf-digital-twin-app/setup/setup_rf_digital_twin.py`** — One-shot setup notebook. Provisions Lakebase, creates the UC schema (`cmegdemos_catalog.sionna_rf_data`), seeds the default 7-cell network, runs Sionna for the preset configs, caches everything.
-3. **`App/rf-digital-twin-app/jobs/sionna_compute_job.py`** — Databricks Job notebook. Triggered by the app on cache miss. Runs Sionna RT on a GPU job cluster and writes results back to Lakebase.
+The detailed tradeoffs (concurrent-user scaling, cost shape, hybrid pattern at real scale) are in [Lakebase vs Lakehouse — performance at scale](#lakebase-vs-lakehouse--performance-at-scale).
+
+---
+
+## Architecture (both variants)
+
+Same three-stage pattern; the only thing that changes between variants is the cache layer in the middle.
 
 ```
    ┌─────────────────────────────────────────────────────────────────────────┐
    │  ① ONE-TIME SETUP — populates the cache                                 │
    │                                                                         │
-   │     setup/setup_rf_digital_twin.py   (run once, GPU cluster ~30-50 min) │
-   │     ─ provisions Lakebase Postgres                                      │
-   │     ─ creates cmegdemos_catalog.sionna_rf_data UC schema                │
-   │     ─ renders 19 preset configurations through Sionna RT                │
-   │     ─ writes scene/SINR/CDF PNG bytes + KPI JSON → Lakebase             │
+   │     setup notebook   (run once on a GPU cluster, ~30–50 min)            │
+   │     ─ creates schema / tables / database                                │
+   │     ─ renders the 19 presets through Sionna RT                          │
+   │     ─ writes scene render + SINR map + association + CDFs + KPIs        │
    └────────────────────────────────────────┬────────────────────────────────┘
-                                            │
                                             ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
-   │  Lakebase Postgres  (rf-digital-twin-pg / database rf_digital_twin)     │
+   │  CACHE LAYER  (Lakebase Postgres  OR  UC Delta tables)                  │
    │  ─ scene_configs       one row per saved scene-level config + hash      │
    │  ─ cell_configs        7 TX rows per scene config                       │
-   │  ─ cached_renders      PNG bytea + KPI JSONB keyed by config_hash       │
+   │  ─ cached_renders      PNGs + KPI JSON keyed by config_hash             │
    │  ─ compute_jobs        run-id and status for live re-renders            │
-   └─────────────────┬──────────────────────────────────┬────────────────────┘
-                     ▲                                  ▲
-                     │ reads on cache hit (<1 s)        │ writes on completion
-                     │                                  │
-   ┌─────────────────┴──────────────────┐  cache miss  ┌┴────────────────────┐
-   │  ② RUNTIME APP                     │ ── Jobs ──▶ │  ③ LIVE RE-RENDER   │
-   │                                    │   API       │                     │
-   │  App/rf-digital-twin-app/app.py    │             │  jobs/sionna_compute │
-   │  Shiny app deployed via            │             │  _job.py            │
-   │  Databricks Apps                   │             │                     │
-   │                                    │             │  Databricks Job      │
-   │  ─ reads cached renders by hash    │             │  417222810044410     │
-   │  ─ submits Job on cache miss       │             │  g5.xlarge GPU       │
-   │  ─ polls cache until job writes    │             │  ~5-8 min per render │
-   │     the new render                 │             │                     │
-   └────────────────────────────────────┘             └─────────────────────┘
+   └────────────┬─────────────────────────────────────────┬──────────────────┘
+                ▲ reads (cache hit)                       ▲ writes (on done)
+                │                                         │
+   ┌────────────┴───────────────────┐  cache miss   ┌─────┴─────────────────┐
+   │  ② RUNTIME APP                 │ ── Jobs API ─▶│  ③ LIVE RE-RENDER     │
+   │  Shiny on Databricks Apps      │               │  Sionna RT on a       │
+   │  ─ user types sidebar values   │               │  g5.xlarge GPU job    │
+   │  ─ Render → sha256(config)     │               │  cluster              │
+   │  ─ hit: load cache in <1 s     │               │  ~5–8 min cold,       │
+   │  ─ miss: submit job, poll cache│               │  ~2–3 min warm        │
+   │  ─ Cancel button kills the run │               │                       │
+   └────────────────────────────────┘               └───────────────────────┘
 ```
 
-**Path 1 — Cache hit (the demo path):** user edits sidebar → `app.py` hashes the config → Lakebase `cached_renders` returns the row → renders display in under a second. This is what the cheat sheet below enables.
+- **Path 1 — Cache hit (the demo path):** sidebar values → `config_hash` → cache row → tabs render in under a second.
+- **Path 2 — Cache miss (the live-edit path):** off-menu config → live job → results flow into the cache → app picks them up via a background poller.
+- **Setup is idempotent** — re-running the setup notebook only renders presets whose hash isn't already cached, so adding new configs later is cheap.
 
-**Path 2 — Cache miss (the live-edit path):** user submits an off-menu config → `app.py` calls the Databricks Jobs API → `jobs/sionna_compute_job.py` spins up a fresh `g5.xlarge` cluster, runs Sionna, writes the result back to Lakebase → app polls the cache and shows the new render. Wall-clock ≈ 5-8 min cold, 2-3 min warm.
-
-**Setup:** `setup/setup_rf_digital_twin.py` — a Databricks notebook the operator runs once on a GPU cluster to provision Lakebase and pre-render the preset gallery. Idempotent: re-running it only renders presets that aren't already cached, so adding new configs later is cheap.
+For exact notebook paths, cluster specs, and resource-binding commands per variant, see the per-app READMEs linked above.
 
 ---
 
-## Preset gallery — what's cached in Lakebase
+## Preset gallery — what's cached
 
-These are the 19 sidebar combinations that resolve to a **cached render** (instant load). Anything outside this list triggers the live Sionna job described above.
+These are the 19 sidebar combinations that resolve to a **cached render** (instant load) in **either variant**. Anything outside this list triggers the live Sionna job. The `config_hash` algorithm is identical across Lakebase and Lakehouse, so the same hash prefix lands the same render regardless of which variant you're running.
 
 > **Reading the table:** every column is a sidebar input. To reach a row, type **all** of its values in the app sidebar — partial matches (e.g. "20 MHz BW" without also setting "TX 16×16") will not hash to a cached row and will fall to the live job. **All cells in the table that aren't called out keep their Story-A default values** (28 GHz, 100 MHz, tr38901, V, 44 dBm, max_depth 5, 8×2 RX 2×2, etc).
 
@@ -176,6 +178,101 @@ Estimates for the etoile scene with `samples_per_tx=10⁷`, `max_depth=5`, `cell
 † **OOM**: A10G/T4/L4 GPUs (~24 GB VRAM) hit memory limits when you combine many TXs with a fine `cell_size` and high `samples_per_tx`. Mitigations: increase `cell_size` to 2–5 m, drop `samples_per_tx` to 10⁶, or move to multi-GPU instances.
 
 The numbers above are dominated by the ray tracing solver (see the table earlier). Post-processing (scene render, CDFs, association plot, Lakebase write) is **~30–60 s of fixed overhead** regardless of TX count, so for tiny scenes (7 cells, 1× A10G) that overhead is 25 % of total time; for 500 cells it's <1 %.
+
+---
+
+## Lakebase vs Lakehouse — performance at scale
+
+This repo ships **two app variants** that share everything except the cache layer:
+
+- **`App/rf-digital-twin-app/`** — caches renders in Lakebase Postgres (`bytea` columns).
+- **`App/rf-digital-twin-app-lakehouse/`** — caches renders in Unity Catalog Delta tables (`BINARY` columns) read through a SQL warehouse.
+
+`config_hash` is computed identically on both sides, so the cache content is portable — the Lakehouse setup notebook even includes an optional migration cell that copies every preset from Lakebase straight into Delta in minutes, no Sionna re-runs needed.
+
+For a single demo user clicking through cached presets, both feel instant. The architectural choice matters once you stress the read path.
+
+### Hot-path latency per cache lookup
+
+| Workload | Lakebase (CU_1) | Lakehouse (Small serverless SQL warehouse) |
+| --- | --- | --- |
+| Cold path (warehouse idle ≥5 min, scaled to zero) | 10–30 ms | **30–60 s warehouse cold-start**, then 200–500 ms |
+| Warm hit, single row by `config_hash` | **5–15 ms** | 200–400 ms |
+| Single 1 MB PNG blob fetch | **20–50 ms** | 300–800 ms |
+| Sustained QPS per instance/warehouse | **1 000+** | 50–200 |
+
+Where the Lakehouse latency goes for a warm hit:
+
+- HTTPS handshake to the SQL endpoint (~50 ms)
+- Query planning + execution coordination (~50–100 ms)
+- BINARY result transport over Thrift (~50–200 ms for 1 MB)
+- Python connector deserialization (~10–50 ms)
+
+Lakebase keeps an open `psycopg` connection on the app side, so the steady-state read is one round-trip + indexed PK lookup + `bytea` fetch — typical Postgres territory.
+
+### Concurrent user scaling
+
+| Concurrent app users | Lakebase | Lakehouse |
+| --- | --- | --- |
+| 1–5 | Instant, flat latency | First lookup cold-starts the warehouse; rest are warm |
+| 10–50 | Flat latency on CU_1 | Small warehouse may queue at the upper end → bump to Medium |
+| 50–200 | Bump to CU_2 for headroom | Need serverless + multi-cluster load balancing |
+| 200+ | CU_4 or sharded instances | Serverless auto-scaling + a connection-pool layer in front |
+
+SQL warehouses cap concurrent queries per cluster (Small ≈ 10, Medium ≈ 20, Large ≈ 40). Past that, queries queue. Lakebase Postgres sustains 1 000+ short queries/sec per `CU_1` and scales near-linearly up the capacity tiers.
+
+### Cost shape (rough monthly, AWS list)
+
+| Traffic pattern | Lakebase | Lakehouse (serverless SQL) |
+| --- | --- | --- |
+| Idle / no traffic | **~$200/mo** (CU_1 always-on) | **~$0** (warehouse scaled to zero) |
+| Light, intermittent (~10 req/hr) | ~$200/mo | ~$30–80/mo (occasional wake-ups) |
+| Steady (~100 req/hr) | ~$200/mo | ~$200–400/mo (warehouse stays warm) |
+| Heavy (1 000+ req/hr) | ~$200–400/mo (size up if needed) | ~$500–1 500/mo (warm + scaled) |
+| Render bytes storage | bytea in Postgres, ~included | Delta on S3, pennies for this dataset |
+
+The crossover is roughly an order-of-magnitude apart: **Lakehouse wins on intermittent / bursty workloads** because of scale-to-zero; **Lakebase wins on sustained high-QPS** because Postgres has better throughput-per-dollar at saturation.
+
+### When to pick which
+
+Pick **Lakebase** when:
+- The app is the primary read path and users expect sub-50 ms.
+- Traffic is steady or bursty (warehouse cold-start is unacceptable).
+- You'll also do session-state / user-action writes from the app at OLTP latencies.
+- You're already running other Lakebase workloads, so the ops overhead is amortised.
+
+Pick **Lakehouse** when:
+- The cached renders are *also* a data product that analysts will query directly (BI dashboards, surrogate training, drift monitoring).
+- Traffic is intermittent and idle cost matters more than tail latency.
+- You'd rather minimise managed-service surface area (everything stays in UC).
+- Time-travel, column-level governance, or built-in lineage are hard requirements.
+
+### Hybrid — what production looks like at real scale
+
+For a metro-scale deployment (thousands of cached configs, dozens of analysts, an interactive app that needs sub-50 ms reads):
+
+```
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Lakehouse (Delta + UC)  ←  Sionna RT writes here                  │
+   │  ─ system of record + analytics surface                            │
+   │  ─ BI, dashboards, surrogate training, drift monitoring read here  │
+   └─────────────────────────────────┬──────────────────────────────────┘
+                                     │  CDC / Lakeflow continuous task
+                                     ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Lakebase (Postgres)  ←  read-through hot cache                    │
+   │  ─ mirrors the latest version of each cached_renders row           │
+   │  ─ sub-30 ms reads, 1 000+ QPS per instance                        │
+   └────────────────────────────────────────────────────────────────────┘
+                                     ▲
+                                     │  app reads only here
+                                     │
+                                ┌────┴─────┐
+                                │  App     │
+                                └──────────┘
+```
+
+Delta is the source of truth and analytics surface. Lakebase is a thin read-only cache populated by a Lakeflow pipeline that streams new `cached_renders` rows into Postgres. The app talks only to Lakebase. Analysts query Delta directly. You pay for both, but each is sized for its actual workload.
 
 ---
 
@@ -303,22 +400,35 @@ For a metro deployment:
 
 ```
 .
-├── README.md                                # this file
+├── README.md                                       # this file
 ├── rf_planning_optimization/
-│   └── simulation_RT_light.ipynb            # original notebook (single-shot demo)
+│   └── simulation_RT_light.ipynb                   # original notebook (single-shot demo)
 └── App/
-    └── rf-digital-twin-app/
-        ├── README.md                        # app-specific deployment guide
-        ├── app.py                           # Shiny UI + server
-        ├── app.yaml                         # Databricks Apps deploy config
-        ├── requirements.txt
-        ├── defaults.py                      # Config 1, Config 2, default 7-cell layout
-        ├── lakebase_client.py               # Postgres connection + schema + queries
-        ├── sionna_compute.py                # Sionna RT pipeline (shared)
+    ├── rf-digital-twin-app/                        # Lakebase variant (Postgres cache)
+    │   ├── README.md                               # app-specific deployment guide
+    │   ├── app.py                                  # Shiny UI + server
+    │   ├── app.yaml                                # Databricks Apps deploy config
+    │   ├── requirements.txt
+    │   ├── defaults.py                             # Config 1, Config 2, 7-cell layout
+    │   ├── lakebase_client.py                      # Postgres connection + queries
+    │   ├── sionna_compute.py                       # Sionna RT pipeline (shared)
+    │   ├── setup/
+    │   │   └── setup_rf_digital_twin.py            # one-shot Lakebase setup
+    │   └── jobs/
+    │       └── sionna_compute_job.py               # cache-miss job (Postgres write)
+    │
+    └── rf-digital-twin-app-lakehouse/              # Lakehouse variant (UC Delta cache)
+        ├── README.md                               # comparison + deployment guide
+        ├── app.py                                  # identical UI; imports lakehouse_client
+        ├── app.yaml                                # binds SQL warehouse instead of Lakebase
+        ├── requirements.txt                        # databricks-sql-connector + sdk
+        ├── defaults.py                             # identical preset definitions
+        ├── lakehouse_client.py                     # SQL-connector + Delta read/write
+        ├── sionna_compute.py                       # identical pipeline
         ├── setup/
-        │   └── setup_rf_digital_twin.py     # one-shot workspace setup
+        │   └── setup_rf_digital_twin_lakehouse.py  # incl. optional Lakebase→Delta migration
         └── jobs/
-            └── sionna_compute_job.py        # notebook triggered by the app on cache miss
+            └── sionna_compute_job_lakehouse.py     # cache-miss job (Spark Delta write)
 ```
 
 ---
