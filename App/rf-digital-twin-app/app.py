@@ -538,87 +538,63 @@ def server(input, output, session):
     @render.ui
     def status_view():
         try:
-            st = render_state()
-            is_running = bool(st.get("pending_started"))
-            run_id = st.get("pending_run_id")
-            status_text = st.get("status") or "(no status)"
-            config_hash = st.get("config_hash") or "—"
-            error_text = st.get("error")
-            scene = st.get("scene")
+            st = render_state() or {}
+            status_text  = st.get("status") or "(no status)"
+            config_hash  = st.get("config_hash") or "—"
+            run_id       = st.get("pending_run_id")
+            pending_hash = st.get("pending_hash")
+            started      = st.get("pending_started")
+            error_text   = st.get("error")
+            scene        = st.get("scene")
 
-            blocks: list = []
-
-            # 1. Status banner (with spinner if a job is running).
-            if is_running:
-                blocks.append(ui.tags.style(
-                    "@keyframes rfspin{from{transform:rotate(0deg)}"
-                    "to{transform:rotate(360deg)}}"
-                    ".rf-spinner{border:3px solid #eee;border-top:3px solid #2c7be5;"
-                    "border-radius:50%;width:18px;height:18px;"
-                    "animation:rfspin 1s linear infinite;"
-                    "display:inline-block;vertical-align:middle;margin-right:8px}"
-                ))
-                blocks.append(ui.tags.div(
-                    ui.tags.div(class_="rf-spinner"),
-                    ui.tags.span(status_text),
-                    style=(
-                        "padding:10px;background:#f4f8ff;border:1px solid #2c7be5;"
-                        "border-radius:4px;margin-bottom:12px;"
-                    ),
-                ))
-            else:
-                blocks.append(ui.tags.div(
-                    ui.tags.strong("Status: "),
-                    status_text,
-                    style="padding:10px;background:#f8f9fa;border-radius:4px;margin-bottom:12px;",
-                ))
-
-            # 2. Job run link.
+            run_link = ""
             if run_id and SIONNA_JOB_ID and DATABRICKS_WORKSPACE_URL:
                 run_url = f"{DATABRICKS_WORKSPACE_URL}/jobs/{SIONNA_JOB_ID}/runs/{run_id}"
-                blocks.append(ui.tags.p(
-                    ui.tags.strong("Job run: "),
-                    ui.tags.a(f"run_id={run_id}", href=run_url, target="_blank",
-                              rel="noopener"),
-                ))
+                run_link = ui.tags.a(
+                    f"open run_id={run_id}", href=run_url, target="_blank", rel="noopener",
+                )
 
-            # 3. Config hash.
-            blocks.append(ui.tags.p(
-                ui.tags.strong("Config hash: "),
-                ui.tags.code(config_hash),
-            ))
-
-            # 4. Error.
-            if error_text:
-                blocks.append(ui.tags.div(
-                    ui.tags.strong("Error: "), error_text,
-                    style=(
-                        "color:#c00;padding:10px;border:1px solid #c00;"
-                        "border-radius:4px;margin:12px 0;"
-                    ),
-                ))
-
-            # 5. Scene dump.
+            scene_block = "(no scene yet — click Render)"
             if scene:
                 try:
-                    scene_json = json.dumps(scene, indent=2, default=str)
+                    scene_block = json.dumps(scene, indent=2, default=str)
                 except Exception as e:
-                    scene_json = f"(could not serialize scene: {e})"
-                blocks.append(ui.h5("Current scene config"))
-                blocks.append(ui.tags.pre(
-                    scene_json,
-                    style=(
-                        "background:#f8f9fa;padding:10px;border-radius:4px;"
-                        "font-size:12px;max-height:400px;overflow:auto;"
-                    ),
-                ))
+                    scene_block = f"(could not serialise scene: {e})"
 
-            return ui.div(*blocks, style="padding:8px;")
+            return ui.div(
+                ui.h4("Status"),
+                ui.tags.p(ui.tags.strong("Message: "), status_text),
+                ui.tags.p(
+                    ui.tags.strong("Pending job: "),
+                    "yes" if pending_hash else "no",
+                    f"  (run_id={run_id})" if run_id else "",
+                    "  ", run_link,
+                ),
+                ui.tags.p(
+                    ui.tags.strong("Config hash: "), ui.tags.code(str(config_hash)),
+                ),
+                ui.tags.p(
+                    ui.tags.strong("Job submitted at: "),
+                    str(started) if started else "—",
+                ),
+                ui.tags.div(
+                    ui.tags.strong("Error: "), str(error_text),
+                    style="color:#c00; padding:8px; border:1px solid #c00; "
+                          "border-radius:4px; margin:8px 0;",
+                ) if error_text else "",
+                ui.h5("Scene config"),
+                ui.tags.pre(
+                    scene_block,
+                    style="background:#f8f9fa; padding:10px; border-radius:4px; "
+                          "font-size:12px; max-height:400px; overflow:auto;",
+                ),
+                style="padding:12px;",
+            )
         except Exception as e:
             import traceback as _tb
             return ui.tags.pre(
                 f"status_view error: {e}\n\n{_tb.format_exc()}",
-                style="color:#c00;padding:10px;",
+                style="color:#c00; padding:10px;",
             )
 
 
