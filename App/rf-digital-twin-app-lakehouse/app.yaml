@@ -23,7 +23,7 @@ env:
   # Databricks Job that renders custom configs to Lakehouse on cache miss.
   # Created by the setup notebook; ID copied here once it exists.
   - name: "SIONNA_JOB_ID"
-    value: "REPLACE_WITH_LAKEHOUSE_JOB_ID"
+    value: "826620913190313"
 
   - name: "DATABRICKS_WORKSPACE_URL"
     value: "https://fevm-cmegdemos.cloud.databricks.com"
