@@ -129,7 +129,7 @@ When you don't need photorealistic ray tracing, lean on cheaper models. Each of 
 
 **Recommended pattern:** offer two modes in the app — *preview* (10⁶ samples, depth 3, cell_size 5 m → ~10× faster) for live iteration, *full* (10⁷ samples, depth 5, cell_size 1 m) for the committed cached result.
 
-**ML surrogate** is the long-game move. Train a small CNN / U-Net on a few thousand (config → radio_map) pairs from real Sionna runs. Inference is ~1 second instead of minutes. You still validate with real Sionna periodically. NVIDIA published [Sionna AIRA](https://nvlabs.github.io/sionna-airframe/) and several papers that follow this exact pattern.
+**ML surrogate** is the long-game move. Train a small CNN / U-Net on a few thousand (config → radio_map) pairs from real Sionna runs. Inference is ~1 second instead of minutes; you still validate against real Sionna periodically. Sionna RT was designed with this workflow in mind — the [RT tutorials](https://nvlabs.github.io/sionna/rt/tutorials.html) cover differentiable ray tracing end-to-end, and the broader [Sionna research](https://developer.nvidia.com/blog/tag/sionna/) corpus from NVIDIA has examples of learned propagation models. For production RAN, the surrogate pattern is what underpins NVIDIA's [Aerial platform](https://developer.nvidia.com/aerial).
 
 ### Putting it together
 
@@ -169,8 +169,8 @@ For a metro deployment:
 
 ## Further reading
 
-- [Sionna RT documentation](https://nvlabs.github.io/sionna/rt/) — official ray-tracing docs and tutorials.
-- [Lakebase docs](https://docs.databricks.com/aws/en/lakebase/) — managed Postgres on Databricks.
+- [Sionna RT documentation](https://nvlabs.github.io/sionna/rt/index.html) — official ray-tracing docs and tutorials.
+- [Lakebase docs](https://docs.databricks.com/aws/en/oltp/) — managed Postgres on Databricks (Lakebase OLTP).
 - [Databricks Apps docs](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/) — running Shiny / FastAPI / etc. apps.
 - Medium series this project is built on:
   - [Part I — "NVIDIA's AI-Native Digital Twin on Databricks"](https://medium.com/@razibayati20/nvidias-ai-native-digital-twin-on-databricks-true-ai-democratization-for-telecom-bdb81ef87b70)
