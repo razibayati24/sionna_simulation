@@ -114,9 +114,9 @@ Treat the simulation as a **data product**. The output of Sionna is deterministi
 - TX configs are versioned (`scene_configs` table already supports this).
 - Whenever a tower changes, mark the affected tile's hash stale and re-render. Use Lakeflow / Workflows to drive the orchestration.
 
-### Option B — Approximate the simulation
+### Option B — Approximate the simulation, end-to-end on Databricks
 
-When you don't need photorealistic ray tracing, lean on cheaper models. Each of these can cut render time 10–100× per tile.
+When you don't need photorealistic ray tracing, lean on cheaper models. The Sionna-specific knobs each cut render time 10–100× per tile:
 
 | Knob | Default | Approximate setting | Speed-up | Accuracy hit |
 | --- | --- | --- | --- | --- |
@@ -129,7 +129,60 @@ When you don't need photorealistic ray tracing, lean on cheaper models. Each of 
 
 **Recommended pattern:** offer two modes in the app — *preview* (10⁶ samples, depth 3, cell_size 5 m → ~10× faster) for live iteration, *full* (10⁷ samples, depth 5, cell_size 1 m) for the committed cached result.
 
-**ML surrogate** is the long-game move. Train a small CNN / U-Net on a few thousand (config → radio_map) pairs from real Sionna runs. Inference is ~1 second instead of minutes; you still validate against real Sionna periodically. Sionna RT was designed with this workflow in mind — the [RT tutorials](https://nvlabs.github.io/sionna/rt/tutorials.html) cover differentiable ray tracing end-to-end, and the broader [Sionna research](https://developer.nvidia.com/blog/tag/sionna/) corpus from NVIDIA has examples of learned propagation models. For production RAN, the surrogate pattern is what underpins NVIDIA's [Aerial platform](https://developer.nvidia.com/aerial).
+The biggest unlock is the **ML surrogate** — and this is where Databricks turns from "a place to run Sionna" into the actual reason to buy. Every link in the chain below is a managed Databricks capability, governed by Unity Catalog, and stitched together without leaving the workspace:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                ML surrogate lifecycle — all on Databricks                   │
+│                                                                             │
+│   ① Lakeflow Jobs ──────────► Sionna RT renders (Ray / Spark GPU pool)      │
+│      (parallel data gen)      │  thousands of (config → radio_map) pairs    │
+│                               ▼                                             │
+│   ② Delta Lake + UC Volumes ──► training corpus, governed by Unity Catalog  │
+│                               ▼                                             │
+│   ③ Mosaic AI Model Training / AutoML ──► small CNN / U-Net surrogate       │
+│                               ▼                                             │
+│   ④ MLflow Tracking + UC Model Registry ──► versioned, stage-promoted       │
+│                               ▼                                             │
+│   ⑤ Mosaic AI Model Serving (autoscale → 0) ──► <50 ms inference endpoint   │
+│                               ▼                                             │
+│   ⑥ Shiny app ──► Lakebase cache  +  surrogate endpoint  +  full Sionna job │
+│                               ▲                                             │
+│   ⑦ Lakehouse Monitoring ─────┴─── drift alert ──► retrain (back to ①)      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each stage and the Databricks primitive that runs it:
+
+1. **Training data generation** — embarrassingly parallel Sionna RT renders driven by **Lakeflow Jobs** with a for-each task over a job-cluster pool, or **Ray on Databricks** for finer-grained per-GPU parallelism. Generate 10 k labelled pairs over a weekend on a small GPU pool.
+2. **Storage + governance** — config metadata + KPIs in **Delta Lake** for columnar analytics ("show me tiles where surrogate error > 5 dB"), raw radio-map tensors in **UC Volumes**, the whole lineage versioned by **Unity Catalog**. Same dataset is queryable from a notebook, BI dashboard, or model training job.
+3. **Training** — **Mosaic AI Model Training** for distributed training on multi-GPU clusters, or **AutoML** for a one-click baseline that beats hand-rolled architectures in ~an hour. **Feature Store** registers the RF config schema as a versioned feature set so training and serving share the exact same definition.
+4. **Experiment tracking + registry** — every run logged to **MLflow Tracking** with hyperparameters, training curves, RMSE-vs-Sionna on held-out tiles. **UC-backed Model Registry** holds the champion + challengers with dev/staging/prod stage transitions and per-model permissions.
+5. **Serving** — **Mosaic AI Model Serving** hosts the surrogate as an autoscaling REST endpoint (scale-to-zero when idle). The app calls it for **interactive preview** during sidebar edits — sub-second feedback. When the user commits, the **same Lakebase cache** + the full Sionna job (Option A) handles the production render. Both surrogate and Sionna outputs flow back into the same cache, so a future query lands on whichever is fresher.
+6. **Drift monitoring + retraining** — **Lakehouse Monitoring** computes daily distributional metrics between surrogate predictions and the periodic ground-truth Sionna renders. Alerts trigger a **Lakeflow workflow** that pulls the latest pairs, retrains, and auto-promotes the new model via **MLflow webhooks** if it beats the current champion on a held-out evaluation set.
+7. **Analyst access** — RF engineers query the simulation results in natural language via **Genie**, build dashboards in **AI/BI**, or do similarity search ("find the cached config closest to my edits") with **Mosaic AI Vector Search**. All without writing a single line of model-serving code.
+
+**Why Databricks is the right home for this — not a generic ML stack:**
+
+- **One platform, one identity, one bill.** GPU training, Postgres serving, Delta storage, model registry, vector search, dashboards — all under the same workspace, the same Unity Catalog permissions, the same cost-attribution tags. No SageMaker ↔ RDS ↔ Snowflake ↔ Weights-and-Biases shuttle.
+- **The training data and the production data are the same table.** The Delta table that holds 100 k Sionna renders is exactly what the Lakeflow pipeline updates nightly and what Mosaic AI Model Training reads from. No ETL between research and production.
+- **Governance is built in.** Unity Catalog handles row/column-level security on the training corpus, lineage tracking from raw OSM data → cached render → trained model → serving endpoint, and audit logs for every change. For a telco shipping this internationally, that's table stakes that AWS-native equivalents need a separate compliance lift to match.
+- **Cost flexibility.** Serverless GPU for ad-hoc training, job clusters for nightly batches, scale-to-zero serving for the surrogate endpoint, Lakebase for hot reads. You don't pay for idle infrastructure the way a self-managed Triton + EKS setup would force you to.
+- **Iteration speed.** A data scientist can prototype a new surrogate in a notebook attached to the same Delta table the production pipeline uses, log to the same MLflow experiment, and promote a winning model to production with a single CLI call. The "deploy a Python model" friction that motivates most "let's use a managed ML platform" decisions just isn't there.
+
+For a telco RF team, the practical decision tree looks like:
+
+| If you want to… | The Databricks path | The DIY equivalent |
+| --- | --- | --- |
+| Render a few configs, share results | Notebook + plot | … same |
+| Render thousands of configs nightly | Lakeflow Jobs + Spark/Ray on GPU pool | Custom Airflow + EKS + spot reaper |
+| Cache renders for a Shiny app | Lakebase + Databricks Apps | RDS + ECS + ALB + IAM |
+| Train an ML surrogate | Mosaic AI Model Training + MLflow + UC | SageMaker / Vertex + own registry + own permissions |
+| Serve the surrogate at <50 ms | Mosaic AI Model Serving (scale-to-zero) | Triton + EKS + autoscaler + auth proxy |
+| Detect surrogate drift, retrain | Lakehouse Monitoring + Lakeflow trigger | Custom metrics + Airflow + alerting glue |
+| Let RF engineers query results | Genie + AI/BI Dashboards | Separate BI tool + secondary data warehouse |
+
+Same goal, **one platform vs. seven**.
 
 ### Putting it together
 
