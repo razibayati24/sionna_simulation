@@ -129,7 +129,7 @@ When you don't need photorealistic ray tracing, lean on cheaper models. The Sion
 
 **Recommended pattern:** offer two modes in the app — *preview* (10⁶ samples, depth 3, cell_size 5 m → ~10× faster) for live iteration, *full* (10⁷ samples, depth 5, cell_size 1 m) for the committed cached result.
 
-The biggest unlock is the **ML surrogate** — and this is where Databricks turns from "a place to run Sionna" into the actual reason to buy. Every link in the chain below is a managed Databricks capability, governed by Unity Catalog, and stitched together without leaving the workspace:
+The biggest unlock is the **ML surrogate** 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
