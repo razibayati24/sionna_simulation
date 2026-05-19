@@ -179,6 +179,101 @@ The numbers above are dominated by the ray tracing solver (see the table earlier
 
 ---
 
+## Lakebase vs Lakehouse — performance at scale
+
+This repo ships **two app variants** that share everything except the cache layer:
+
+- **`App/rf-digital-twin-app/`** — caches renders in Lakebase Postgres (`bytea` columns).
+- **`App/rf-digital-twin-app-lakehouse/`** — caches renders in Unity Catalog Delta tables (`BINARY` columns) read through a SQL warehouse.
+
+`config_hash` is computed identically on both sides, so the cache content is portable — the Lakehouse setup notebook even includes an optional migration cell that copies every preset from Lakebase straight into Delta in minutes, no Sionna re-runs needed.
+
+For a single demo user clicking through cached presets, both feel instant. The architectural choice matters once you stress the read path.
+
+### Hot-path latency per cache lookup
+
+| Workload | Lakebase (CU_1) | Lakehouse (Small serverless SQL warehouse) |
+| --- | --- | --- |
+| Cold path (warehouse idle ≥5 min, scaled to zero) | 10–30 ms | **30–60 s warehouse cold-start**, then 200–500 ms |
+| Warm hit, single row by `config_hash` | **5–15 ms** | 200–400 ms |
+| Single 1 MB PNG blob fetch | **20–50 ms** | 300–800 ms |
+| Sustained QPS per instance/warehouse | **1 000+** | 50–200 |
+
+Where the Lakehouse latency goes for a warm hit:
+
+- HTTPS handshake to the SQL endpoint (~50 ms)
+- Query planning + execution coordination (~50–100 ms)
+- BINARY result transport over Thrift (~50–200 ms for 1 MB)
+- Python connector deserialization (~10–50 ms)
+
+Lakebase keeps an open `psycopg` connection on the app side, so the steady-state read is one round-trip + indexed PK lookup + `bytea` fetch — typical Postgres territory.
+
+### Concurrent user scaling
+
+| Concurrent app users | Lakebase | Lakehouse |
+| --- | --- | --- |
+| 1–5 | Instant, flat latency | First lookup cold-starts the warehouse; rest are warm |
+| 10–50 | Flat latency on CU_1 | Small warehouse may queue at the upper end → bump to Medium |
+| 50–200 | Bump to CU_2 for headroom | Need serverless + multi-cluster load balancing |
+| 200+ | CU_4 or sharded instances | Serverless auto-scaling + a connection-pool layer in front |
+
+SQL warehouses cap concurrent queries per cluster (Small ≈ 10, Medium ≈ 20, Large ≈ 40). Past that, queries queue. Lakebase Postgres sustains 1 000+ short queries/sec per `CU_1` and scales near-linearly up the capacity tiers.
+
+### Cost shape (rough monthly, AWS list)
+
+| Traffic pattern | Lakebase | Lakehouse (serverless SQL) |
+| --- | --- | --- |
+| Idle / no traffic | **~$200/mo** (CU_1 always-on) | **~$0** (warehouse scaled to zero) |
+| Light, intermittent (~10 req/hr) | ~$200/mo | ~$30–80/mo (occasional wake-ups) |
+| Steady (~100 req/hr) | ~$200/mo | ~$200–400/mo (warehouse stays warm) |
+| Heavy (1 000+ req/hr) | ~$200–400/mo (size up if needed) | ~$500–1 500/mo (warm + scaled) |
+| Render bytes storage | bytea in Postgres, ~included | Delta on S3, pennies for this dataset |
+
+The crossover is roughly an order-of-magnitude apart: **Lakehouse wins on intermittent / bursty workloads** because of scale-to-zero; **Lakebase wins on sustained high-QPS** because Postgres has better throughput-per-dollar at saturation.
+
+### When to pick which
+
+Pick **Lakebase** when:
+- The app is the primary read path and users expect sub-50 ms.
+- Traffic is steady or bursty (warehouse cold-start is unacceptable).
+- You'll also do session-state / user-action writes from the app at OLTP latencies.
+- You're already running other Lakebase workloads, so the ops overhead is amortised.
+
+Pick **Lakehouse** when:
+- The cached renders are *also* a data product that analysts will query directly (BI dashboards, surrogate training, drift monitoring).
+- Traffic is intermittent and idle cost matters more than tail latency.
+- You'd rather minimise managed-service surface area (everything stays in UC).
+- Time-travel, column-level governance, or built-in lineage are hard requirements.
+
+### Hybrid — what production looks like at real scale
+
+For a metro-scale deployment (thousands of cached configs, dozens of analysts, an interactive app that needs sub-50 ms reads):
+
+```
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Lakehouse (Delta + UC)  ←  Sionna RT writes here                  │
+   │  ─ system of record + analytics surface                            │
+   │  ─ BI, dashboards, surrogate training, drift monitoring read here  │
+   └─────────────────────────────────┬──────────────────────────────────┘
+                                     │  CDC / Lakeflow continuous task
+                                     ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Lakebase (Postgres)  ←  read-through hot cache                    │
+   │  ─ mirrors the latest version of each cached_renders row           │
+   │  ─ sub-30 ms reads, 1 000+ QPS per instance                        │
+   └────────────────────────────────────────────────────────────────────┘
+                                     ▲
+                                     │  app reads only here
+                                     │
+                                ┌────┴─────┐
+                                │  App     │
+                                └──────────┘
+```
+
+Delta is the source of truth and analytics surface. Lakebase is a thin read-only cache populated by a Lakeflow pipeline that streams new `cached_renders` rows into Postgres. The app talks only to Lakebase. Analysts query Delta directly. You pay for both, but each is sized for its actual workload.
+
+---
+
 ## How to scale
 
 Two complementary strategies. Both are needed for production-scale deployments (full metro coverage, ~thousands of cells).
@@ -303,22 +398,35 @@ For a metro deployment:
 
 ```
 .
-├── README.md                                # this file
+├── README.md                                       # this file
 ├── rf_planning_optimization/
-│   └── simulation_RT_light.ipynb            # original notebook (single-shot demo)
+│   └── simulation_RT_light.ipynb                   # original notebook (single-shot demo)
 └── App/
-    └── rf-digital-twin-app/
-        ├── README.md                        # app-specific deployment guide
-        ├── app.py                           # Shiny UI + server
-        ├── app.yaml                         # Databricks Apps deploy config
-        ├── requirements.txt
-        ├── defaults.py                      # Config 1, Config 2, default 7-cell layout
-        ├── lakebase_client.py               # Postgres connection + schema + queries
-        ├── sionna_compute.py                # Sionna RT pipeline (shared)
+    ├── rf-digital-twin-app/                        # Lakebase variant (Postgres cache)
+    │   ├── README.md                               # app-specific deployment guide
+    │   ├── app.py                                  # Shiny UI + server
+    │   ├── app.yaml                                # Databricks Apps deploy config
+    │   ├── requirements.txt
+    │   ├── defaults.py                             # Config 1, Config 2, 7-cell layout
+    │   ├── lakebase_client.py                      # Postgres connection + queries
+    │   ├── sionna_compute.py                       # Sionna RT pipeline (shared)
+    │   ├── setup/
+    │   │   └── setup_rf_digital_twin.py            # one-shot Lakebase setup
+    │   └── jobs/
+    │       └── sionna_compute_job.py               # cache-miss job (Postgres write)
+    │
+    └── rf-digital-twin-app-lakehouse/              # Lakehouse variant (UC Delta cache)
+        ├── README.md                               # comparison + deployment guide
+        ├── app.py                                  # identical UI; imports lakehouse_client
+        ├── app.yaml                                # binds SQL warehouse instead of Lakebase
+        ├── requirements.txt                        # databricks-sql-connector + sdk
+        ├── defaults.py                             # identical preset definitions
+        ├── lakehouse_client.py                     # SQL-connector + Delta read/write
+        ├── sionna_compute.py                       # identical pipeline
         ├── setup/
-        │   └── setup_rf_digital_twin.py     # one-shot workspace setup
+        │   └── setup_rf_digital_twin_lakehouse.py  # incl. optional Lakebase→Delta migration
         └── jobs/
-            └── sionna_compute_job.py        # notebook triggered by the app on cache miss
+            └── sionna_compute_job_lakehouse.py     # cache-miss job (Spark Delta write)
 ```
 
 ---
