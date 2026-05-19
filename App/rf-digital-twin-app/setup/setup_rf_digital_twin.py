@@ -111,7 +111,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, asdict
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import matplotlib as mpl
@@ -195,21 +195,66 @@ class SceneConfig:
     min_sinr_db: float = 3.0
     min_user_dist_m: float = 10.0
     max_user_dist_m: float = 200.0
+    # When set, every cell's power_dbm gets replaced with this value.
+    cell_power_override_dbm: Optional[float] = None
 
     def to_dict(self):
         return asdict(self)
 
 
-CONFIG_1 = SceneConfig("Config 1 (8x2 TX / 2x2 RX)",  8,  2, 2, 2)
-CONFIG_2 = SceneConfig("Config 2 (16x16 TX / 2x2 RX)", 16, 16, 2, 2)
+def cells_for_preset(cfg: SceneConfig, base_cells: list[dict]) -> list[dict]:
+    """Apply preset-level overrides (e.g. uniform TX power) to the cell list."""
+    cells = [dict(c) for c in base_cells]
+    if cfg.cell_power_override_dbm is not None:
+        for c in cells:
+            c["power_dbm"] = float(cfg.cell_power_override_dbm)
+    return cells
 
-# Extra "what-if" variants that get pre-cached so live demos can flip between
-# additional knobs without waiting on the Sionna job. Edit/extend freely.
-CONFIG_3 = SceneConfig("Config 3 (4x4 TX / 2x2 RX — middle ground)", 4, 4, 2, 2)
-CONFIG_4 = SceneConfig("Config 4 (8x2 TX, 2.6 GHz)",  8, 2, 2, 2, frequency_hz=2.6e9)
-CONFIG_5 = SceneConfig("Config 5 (16x16 TX, max depth=8)", 16, 16, 2, 2, max_depth=8)
 
-PRESETS = [CONFIG_1, CONFIG_2, CONFIG_3, CONFIG_4, CONFIG_5]
+# Story A — Antenna densification
+CONFIG_DENS_2X2  = SceneConfig("A · Densification — 2×2 TX (baseline)",   2,  2, 2, 2)
+CONFIG_DENS_4X4  = SceneConfig("A · Densification — 4×4 TX",              4,  4, 2, 2)
+CONFIG_1         = SceneConfig("A · Densification — 8×2 TX (Config 1)",   8,  2, 2, 2)
+CONFIG_DENS_8X8  = SceneConfig("A · Densification — 8×8 TX",              8,  8, 2, 2)
+CONFIG_2         = SceneConfig("A · Densification — 16×16 TX (Config 2)", 16, 16, 2, 2)
+CONFIG_DENS_32X8 = SceneConfig("A · Densification — 32×8 TX (elongated)", 32, 8, 2, 2)
+
+# Story B — Frequency band ladder (8×2 TX held constant)
+# Note: the etoile scene's ITU `marble` material is only defined for 1–100 GHz,
+# so the lowest band here is 1.8 GHz (LTE band 3), not 700 MHz.
+CONFIG_FREQ_1P8G = SceneConfig("B · Frequency — 8×2 @ 1.8 GHz",  8, 2, 2, 2, frequency_hz=1.8e9,  bandwidth_hz=2e7)
+CONFIG_FREQ_2P6G = SceneConfig("B · Frequency — 8×2 @ 2.6 GHz",  8, 2, 2, 2, frequency_hz=2.6e9,  bandwidth_hz=2e7)
+CONFIG_FREQ_3P5G = SceneConfig("B · Frequency — 8×2 @ 3.5 GHz",  8, 2, 2, 2, frequency_hz=3.5e9,  bandwidth_hz=1e8)
+CONFIG_FREQ_39G  = SceneConfig("B · Frequency — 8×2 @ 39 GHz",   8, 2, 2, 2, frequency_hz=3.9e10, bandwidth_hz=4e8)
+
+# Story C — Antenna pattern (16×16 TX held constant)
+CONFIG_PAT_ISO    = SceneConfig("C · Pattern — 16×16 isotropic", 16, 16, 2, 2, pattern="iso")
+CONFIG_PAT_DIPOLE = SceneConfig("C · Pattern — 16×16 dipole",    16, 16, 2, 2, pattern="dipole")
+
+# Story D — Polarization (16×16 TX held constant)
+CONFIG_POL_VH = SceneConfig("D · Polarization — 16×16 cross (VH)", 16, 16, 2, 2, polarization="VH")
+
+# Story E — Power level (uniform across cells)
+CONFIG_PWR_LOW  = SceneConfig("E · Power — 16×16 @ 38 dBm", 16, 16, 2, 2, cell_power_override_dbm=38.0)
+CONFIG_PWR_HIGH = SceneConfig("E · Power — 16×16 @ 50 dBm", 16, 16, 2, 2, cell_power_override_dbm=50.0)
+
+# Story F — Bandwidth (16×16 TX held constant)
+CONFIG_BW_20M  = SceneConfig("F · Bandwidth — 16×16 @ 20 MHz",  16, 16, 2, 2, bandwidth_hz=2e7)
+CONFIG_BW_400M = SceneConfig("F · Bandwidth — 16×16 @ 400 MHz", 16, 16, 2, 2, bandwidth_hz=4e8)
+
+# Story G — Ray tracing fidelity (16×16 TX held constant)
+CONFIG_DEPTH_3 = SceneConfig("G · Fidelity — 16×16 max_depth=3", 16, 16, 2, 2, max_depth=3)
+CONFIG_DEPTH_8 = SceneConfig("G · Fidelity — 16×16 max_depth=8", 16, 16, 2, 2, max_depth=8)
+
+PRESETS = [
+    CONFIG_DENS_2X2, CONFIG_DENS_4X4, CONFIG_1, CONFIG_DENS_8X8, CONFIG_2, CONFIG_DENS_32X8,
+    CONFIG_FREQ_1P8G, CONFIG_FREQ_2P6G, CONFIG_FREQ_3P5G, CONFIG_FREQ_39G,
+    CONFIG_PAT_ISO, CONFIG_PAT_DIPOLE,
+    CONFIG_POL_VH,
+    CONFIG_PWR_LOW, CONFIG_PWR_HIGH,
+    CONFIG_BW_20M, CONFIG_BW_400M,
+    CONFIG_DEPTH_3, CONFIG_DEPTH_8,
+]
 
 # COMMAND ----------
 
@@ -635,44 +680,167 @@ def run_simulation(scene_cfg: dict, cells: list[dict]) -> dict[str, Any]:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Read cell configs from UC + run Sionna for Config 1 and Config 2
+# MAGIC ## 9. Read cell configs from UC + run Sionna for every preset
+# MAGIC
+# MAGIC Loops through `PRESETS`, applies any preset-level cell overrides
+# MAGIC (e.g. uniform TX power), and runs Sionna RT for each. Skips configs
+# MAGIC whose hash is already cached in Lakebase — so re-running this cell
+# MAGIC after adding new presets only renders the new ones.
 
 # COMMAND ----------
 
 # Pull the canonical cell layout out of UC so we can edit there later.
-cells_from_uc = (
+base_cells = (
     spark.table(CELL_TABLE)
     .orderBy("cell_id")
     .toPandas()
     .to_dict(orient="records")
 )
-print(f"Loaded {len(cells_from_uc)} cells from {CELL_TABLE}")
+print(f"Loaded {len(base_cells)} cells from {CELL_TABLE}")
 
 # COMMAND ----------
+
+def _is_already_cached(config_hash: str) -> bool:
+    """True when a non-empty cached_renders row exists for this hash."""
+    with lb_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT length(scene_render_png) AS n "
+            "FROM cached_renders WHERE config_hash = %s",
+            (config_hash,),
+        )
+        row = cur.fetchone()
+    return bool(row and row["n"] and row["n"] > 10_000)
+
 
 precompute_summary = []
 
 for cfg in PRESETS:
     scene_cfg = cfg.to_dict()
-    scene_id, config_hash = upsert_scene(scene_cfg, cells_from_uc, is_preset=True)
+    cells = cells_for_preset(cfg, base_cells)
+    scene_id, config_hash = upsert_scene(scene_cfg, cells, is_preset=True)
     print(f"\n=== {cfg.name} ===")
     print(f"  scene_id     = {scene_id}")
     print(f"  config_hash  = {config_hash}")
+
+    if _is_already_cached(config_hash):
+        print("  Already cached — skipping Sionna run.")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "status": "skipped (already cached)",
+        })
+        continue
+
     print(f"  Running Sionna RT (samples_per_tx={SAMPLES_PER_TX:,})…")
+    try:
+        results = run_simulation(scene_cfg, cells)
+        write_render(config_hash, results)
+        print(f"  Done in {results['compute_seconds']:.1f}s, cached to Lakebase.")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "compute_seconds": results["compute_seconds"],
+            "status": "rendered",
+            "kpis": json.loads(results["kpis_json"]),
+        })
+    except Exception as e:
+        # Don't abort the whole loop — log this preset's failure and continue.
+        # Common causes: ITU material undefined at chosen frequency, GPU OOM
+        # at high cell count + samples, missing pattern, etc.
+        msg = f"{type(e).__name__}: {e}"
+        print(f"  FAILED — {msg}")
+        precompute_summary.append({
+            "name": cfg.name,
+            "config_hash": config_hash,
+            "status": "FAILED",
+            "error": msg,
+        })
 
-    results = run_simulation(scene_cfg, cells_from_uc)
-    write_render(config_hash, results)
+n_rendered = sum(1 for s in precompute_summary if s.get('status') == 'rendered')
+n_skipped  = sum(1 for s in precompute_summary if s.get('status') == 'skipped (already cached)')
+n_failed   = sum(1 for s in precompute_summary if s.get('status') == 'FAILED')
+print(f"\nFinished. {n_rendered} new renders, {n_skipped} skipped, {n_failed} failed.")
+if n_failed:
+    print("Failed presets:")
+    for s in precompute_summary:
+        if s.get('status') == 'FAILED':
+            print(f"  - {s['name']}: {s['error']}")
 
-    print(f"  Done in {results['compute_seconds']:.1f}s, cached to Lakebase.")
-    precompute_summary.append({
-        "name": cfg.name,
-        "config_hash": config_hash,
-        "compute_seconds": results["compute_seconds"],
-        "kpis": json.loads(results["kpis_json"]),
+# Flatten for display: nested dicts and missing columns trip Spark's type
+# inference. Project to a consistent string-only schema.
+display_rows = []
+for s in precompute_summary:
+    display_rows.append({
+        "name":            s.get("name", ""),
+        "config_hash":     s.get("config_hash", ""),
+        "status":          s.get("status", ""),
+        "compute_seconds": str(s.get("compute_seconds", "")),
+        "kpis_summary":    json.dumps(s.get("kpis"), default=str) if s.get("kpis") else "",
+        "error":           s.get("error", ""),
+    })
+display(pd.DataFrame(display_rows))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9b. Demo cheat sheet — sidebar values per preset
+# MAGIC
+# MAGIC Run this cell to print the exact sidebar inputs to set in the app for
+# MAGIC each cached preset. Bookmark / screenshot the resulting table; during
+# MAGIC the demo, glance at it to know what to type so the hash matches a
+# MAGIC cached render and you get an instant flip.
+
+# COMMAND ----------
+
+cheatsheet_rows = []
+for cfg in PRESETS:
+    scene_cfg = cfg.to_dict()
+    cells = cells_for_preset(cfg, base_cells)
+    config_hash = compute_config_hash(scene_cfg, cells)
+
+    # Effective TX power across cells (the override, or the default 44 dBm).
+    power_dbm = (
+        cfg.cell_power_override_dbm
+        if cfg.cell_power_override_dbm is not None
+        else 44.0
+    )
+
+    cheatsheet_rows.append({
+        "preset":      cfg.name,
+        "hash":        config_hash[:12],
+        "TX array":    f"{cfg.num_rows_tx} × {cfg.num_cols_tx}",
+        "RX array":    f"{cfg.num_rows_rx} × {cfg.num_cols_rx}",
+        "Pattern":     cfg.pattern,
+        "Polariz.":    cfg.polarization,
+        "TX pwr dBm":  power_dbm,
+        "Freq GHz":    round(cfg.frequency_hz / 1e9, 3),
+        "BW MHz":      round(cfg.bandwidth_hz / 1e6, 1),
+        "max_depth":   cfg.max_depth,
+        "samples 10^": int(round(__import__("math").log10(cfg.samples_per_tx))),
     })
 
-print("\nAll presets cached.")
-display(pd.DataFrame(precompute_summary))
+cheatsheet_df = pd.DataFrame(cheatsheet_rows)
+
+# Pretty-print the same thing as plain text so the cheat sheet is copy-pastable.
+print("APP SIDEBAR CHEAT SHEET — type these values to match each cached preset")
+print("=" * 110)
+for row in cheatsheet_rows:
+    print(
+        f"  {row['preset']:<55}  hash={row['hash']}"
+    )
+    diffs = []
+    if row['TX array']    != "8 × 2":     diffs.append(f"TX={row['TX array']}")
+    if row['RX array']    != "2 × 2":     diffs.append(f"RX={row['RX array']}")
+    if row['Pattern']     != "tr38901":   diffs.append(f"pattern={row['Pattern']}")
+    if row['Polariz.']    != "V":         diffs.append(f"pol={row['Polariz.']}")
+    if row['TX pwr dBm']  != 44.0:        diffs.append(f"power={row['TX pwr dBm']} dBm")
+    if row['Freq GHz']    != 28.0:        diffs.append(f"freq={row['Freq GHz']} GHz")
+    if row['BW MHz']      != 100.0:       diffs.append(f"BW={row['BW MHz']} MHz")
+    if row['max_depth']   != 5:           diffs.append(f"max_depth={row['max_depth']}")
+    print(f"      vs Config 1 default → {', '.join(diffs) if diffs else 'no changes (same as Config 1)'}")
+print("=" * 110)
+
+display(cheatsheet_df)
 
 # COMMAND ----------
 

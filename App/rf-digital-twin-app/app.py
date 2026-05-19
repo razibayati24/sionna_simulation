@@ -81,9 +81,18 @@ def _collect_scene(input) -> dict:
     }
 
 
-def _collect_cells() -> list[dict]:
-    """The 7-cell layout is fixed (matches what's seeded in Lakebase)."""
-    return preset_cells()
+def _collect_cells(input) -> list[dict]:
+    """7-cell layout with the sidebar's TX-power applied uniformly.
+
+    The 7 positions/look-at points match what's seeded in Lakebase; only
+    power_dbm flexes via the sidebar so power-variant presets remain
+    reachable by hash.
+    """
+    cells = preset_cells()
+    power = float(input.tx_power_dbm())
+    for c in cells:
+        c["power_dbm"] = power
+    return cells
 
 
 def _submit_databricks_job(config_hash: str, scene_cfg: dict, cells: list[dict]) -> int:
@@ -133,6 +142,11 @@ def _sidebar() -> ui.Tag:
                         choices=PATTERN_CHOICES, selected=_initial_scene.pattern),
         ui.input_select("polarization", "Polarization",
                         choices=POLARIZATION_CHOICES, selected=_initial_scene.polarization),
+        ui.h5("Network"),
+        ui.input_numeric(
+            "tx_power_dbm", "TX power per cell (dBm)",
+            value=44.0, min=20.0, max=60.0, step=1.0,
+        ),
         ui.h5("Radio"),
         ui.input_numeric("frequency_ghz", "Frequency (GHz)",
                          value=_initial_scene.frequency_hz / 1e9, min=0.1, max=100, step=0.1),
@@ -206,7 +220,7 @@ def server(input, output, session):
     async def _do_render() -> None:
         try:
             scene_cfg = _collect_scene(input)
-            cells = _collect_cells()
+            cells = _collect_cells(input)
             config_hash = lb.compute_config_hash(scene_cfg, cells)
 
             render_state.set({
