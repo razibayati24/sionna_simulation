@@ -20,6 +20,8 @@ curated "stories" instead hold the array constant and vary one knob (see ``defau
 """
 from __future__ import annotations
 
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -27,6 +29,12 @@ import numpy as np
 import neighborhoods as nb
 
 SOURCE_TABLE = "cmegdemos_catalog.network_analytics_enablement.cell_towers"
+
+# The source table carries a `location geometry(4326)` column whose Delta "geospatial"
+# reader feature isn't supported by the Sionna-validated GPU runtime (DBR 16.4). A
+# serverless SQL warehouse *does* support it, so we read the (non-geometry) columns we need
+# via the SQL Statement Execution API instead of Spark.
+SQL_WAREHOUSE_ENV = "SEATTLE_SQL_WAREHOUSE_ID"
 
 # Frequency menus (Hz) per tower technology. ITU materials in Sionna are only defined
 # ≥1 GHz, so even GSM is bumped to LTE band 3 (1.8 GHz) — same caveat the etoile demo
@@ -105,15 +113,59 @@ def _to_cells(rows: List[Dict[str, Any]], hood: nb.Neighborhood, seed: int) -> L
     return cells
 
 
+def _resolve_warehouse_id(w, warehouse_id: Optional[str]) -> str:
+    """Pick a SQL warehouse: explicit arg → env → first serverless (prefer RUNNING)."""
+    wid = warehouse_id or os.environ.get(SQL_WAREHOUSE_ENV)
+    if wid:
+        return wid
+    serverless, running = [], []
+    for wh in w.warehouses.list():
+        if str(getattr(wh, "warehouse_type", "")).upper().endswith("PRO") or \
+           getattr(wh, "enable_serverless_compute", False):
+            serverless.append(wh)
+            if str(getattr(wh, "state", "")).upper() == "RUNNING":
+                running.append(wh)
+    pick = (running or serverless)
+    if not pick:
+        raise RuntimeError("No SQL warehouse available to read the geospatial tower table; "
+                           f"set {SQL_WAREHOUSE_ENV}.")
+    return pick[0].id
+
+
+def _query_via_warehouse(sql: str, warehouse_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Run a read-only query on a SQL warehouse and return list-of-dict rows."""
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient()
+    wid = _resolve_warehouse_id(w, warehouse_id)
+    resp = w.statement_execution.execute_statement(
+        statement=sql, warehouse_id=wid, wait_timeout="50s",
+    )
+    # Poll if the statement is still running past the inline wait window.
+    deadline = time.time() + 300
+    while str(resp.status.state.value) in ("PENDING", "RUNNING") and time.time() < deadline:
+        time.sleep(2)
+        resp = w.statement_execution.get_statement(resp.statement_id)
+    state = str(resp.status.state.value)
+    if state != "SUCCEEDED":
+        err = getattr(resp.status, "error", None)
+        raise RuntimeError(f"Tower query {state}: {err}")
+    cols = [c.name for c in resp.manifest.schema.columns]
+    data = (resp.result.data_array or []) if resp.result else []
+    return [dict(zip(cols, row)) for row in data]
+
+
 def load_towers(
     neighborhood: str,
-    spark,
+    spark=None,
     seed: int = 1234,
     limit: Optional[int] = None,
+    warehouse_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Read towers inside ``neighborhood`` from UC and return Sionna cell dicts.
 
-    ``spark`` is the active SparkSession (notebook/job context). ``limit`` caps the tower
+    Reads via a serverless SQL warehouse (the geometry column blocks Spark on DBR 16.4).
+    ``spark`` is accepted for call-site compatibility but unused. ``limit`` caps the tower
     count (useful for a quick calibration render).
     """
     hood = nb.get(neighborhood)
@@ -123,5 +175,11 @@ def load_towers(
     )
     if limit:
         sql += f" LIMIT {int(limit)}"
-    rows = [r.asDict() for r in spark.sql(sql).collect()]
+    rows = _query_via_warehouse(sql, warehouse_id)
+    # Warehouse returns all values as strings — coerce the numerics _to_cells relies on.
+    for r in rows:
+        r["tower_id"] = int(r["tower_id"])
+        r["latitude"] = float(r["latitude"])
+        r["longitude"] = float(r["longitude"])
+        r["coverage_radius_m"] = int(r["coverage_radius_m"]) if r.get("coverage_radius_m") else 0
     return _to_cells(rows, hood, seed)

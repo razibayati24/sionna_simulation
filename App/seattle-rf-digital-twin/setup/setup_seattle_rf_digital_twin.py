@@ -82,13 +82,17 @@ print(f"Registered {len(nb.names())} neighborhoods: {', '.join(nb.names())}")
 
 # COMMAND ----------
 
+# Read via the SQL warehouse — the table's geometry column blocks Spark on DBR 16.4.
+import pandas as pd
+
 hood = nb.get("Downtown")
-display(spark.sql(f"""
+_rows = rp.towers._query_via_warehouse(f"""
     SELECT tower_type, COUNT(*) AS n, ROUND(AVG(coverage_radius_m)) AS avg_radius_m
     FROM {rp.towers.SOURCE_TABLE}
     WHERE {hood.sql_bbox_filter()}
     GROUP BY tower_type ORDER BY n DESC
-"""))
+""")
+display(pd.DataFrame(_rows))
 
 # COMMAND ----------
 
