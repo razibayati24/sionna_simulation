@@ -36,12 +36,22 @@ OVERPASS_URL = os.environ.get("OVERPASS_URL", "https://overpass-api.de/api/inter
 
 # ITU material → diffuse reflectance RGB (visual only; RF behaviour comes from the named
 # RadioMaterial Sionna attaches to the ``mat-<name>`` BSDF).
-_BUILDING_MAT = "itu_concrete"
-_GROUND_MAT = "itu_medium_dry_ground"
+_BUILDING_MAT = "itu_concrete"          # valid 1–100 GHz
+_GROUND_MAT = "itu_medium_dry_ground"   # ITU ground model only valid ~1–10 GHz
+# At mmWave the ITU ground model is undefined, so use concrete (1–100 GHz) as a pragmatic
+# ground stand-in above this cutoff.
+_GROUND_MMWAVE_CUTOFF_HZ = 10e9
 _MAT_RGB = {
-    _BUILDING_MAT: (0.55, 0.55, 0.57),
-    _GROUND_MAT: (0.30, 0.32, 0.28),
+    "itu_concrete": (0.55, 0.55, 0.57),
+    "itu_medium_dry_ground": (0.30, 0.32, 0.28),
 }
+
+
+def _ground_material(frequency_hz: Optional[float]) -> str:
+    """Ground RadioMaterial valid at the render frequency (ITU ground model caps ~10 GHz)."""
+    if frequency_hz and float(frequency_hz) > _GROUND_MMWAVE_CUTOFF_HZ:
+        return _BUILDING_MAT
+    return _GROUND_MAT
 
 _DEFAULT_BUILDING_H = 10.0
 
@@ -195,16 +205,19 @@ def _xml(shapes: List[Tuple[str, str]]) -> str:
 
 
 def build_tile_scene_xml(render_bounds, origin, out_dir: str,
-                         cache: bool = True) -> str:
+                         frequency_hz: Optional[float] = None, cache: bool = True) -> str:
     """Build (or reuse cached) Mitsuba XML for a tile; return the XML path.
 
     Always succeeds: on any building-fetch/geometry failure it still writes a ground-only
     scene. The output dir layout is ``<out_dir>/<bbox_hash>/{scene.xml, meshes/*.ply}``.
+    The cache key folds in the ground-material band so a tile reused across sub-10 GHz and
+    mmWave stories gets the right (frequency-valid) ground material.
     """
     import trimesh  # noqa: PLC0415  (always needed for ground + ply export)
 
+    ground_mat = _ground_material(frequency_hz)
     key = hashlib.sha1(
-        json.dumps([render_bounds, origin], sort_keys=True).encode()
+        json.dumps([render_bounds, origin, ground_mat], sort_keys=True).encode()
     ).hexdigest()[:16]
     scene_dir = os.path.join(out_dir, key)
     mesh_dir = os.path.join(scene_dir, "meshes")
@@ -215,10 +228,10 @@ def build_tile_scene_xml(render_bounds, origin, out_dir: str,
     os.makedirs(mesh_dir, exist_ok=True)
 
     shapes: List[Tuple[str, str]] = []
-    # Ground (always present).
+    # Ground (always present); material chosen valid for the render frequency.
     ground = _ground_mesh(render_bounds)
     ground.export(os.path.join(mesh_dir, "ground.ply"))
-    shapes.append(("ground.ply", _GROUND_MAT))
+    shapes.append(("ground.ply", ground_mat))
 
     # Buildings (best-effort).
     polys = fetch_buildings(render_bounds, origin)
@@ -235,9 +248,10 @@ def build_tile_scene_xml(render_bounds, origin, out_dir: str,
     return xml_path
 
 
-def load_tile_scene(render_bounds, origin, out_dir: str = "/tmp/seattle_osm_scenes"):
+def load_tile_scene(render_bounds, origin, out_dir: str = "/tmp/seattle_osm_scenes",
+                    frequency_hz: Optional[float] = None):
     """Build the tile scene and return a loaded Sionna RT ``Scene`` with ITU materials set."""
     from sionna.rt import load_scene  # noqa: PLC0415
 
-    xml_path = build_tile_scene_xml(render_bounds, origin, out_dir)
+    xml_path = build_tile_scene_xml(render_bounds, origin, out_dir, frequency_hz=frequency_hz)
     return load_scene(xml_path)
