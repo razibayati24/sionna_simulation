@@ -198,6 +198,16 @@ def init_schema() -> None:
             # CREATE TABLE statements below land in `seattle`, not the shared `public`.
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_PG_SCHEMA}")
             cur.execute(SCHEMA_DDL)
+            # The app runs as its own service-principal Postgres role. A custom schema
+            # doesn't grant USAGE to other roles by default, so open read access on the
+            # Seattle objects to all roles (idempotent; safe for this demo cache).
+            cur.execute(f"GRANT USAGE ON SCHEMA {_PG_SCHEMA} TO PUBLIC")
+            cur.execute(f"GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA {_PG_SCHEMA} TO PUBLIC")
+            cur.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {_PG_SCHEMA} TO PUBLIC")
+            cur.execute(
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {_PG_SCHEMA} "
+                f"GRANT SELECT, INSERT, UPDATE ON TABLES TO PUBLIC"
+            )
         conn.commit()
 
 
