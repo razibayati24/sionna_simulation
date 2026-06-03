@@ -29,6 +29,9 @@ import psycopg
 from psycopg.rows import dict_row
 
 _DEFAULT_INSTANCE_NAME = "rf-digital-twin-pg"
+# Seattle tables live in their own Postgres schema so they never collide with the etoile
+# demo's tables in the shared rf_digital_twin database (override via PG_SCHEMA).
+_PG_SCHEMA = os.environ.get("PG_SCHEMA", "seattle")
 _TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
 _TOKEN_TTL_SECONDS = 45 * 60
 _INSTANCE_CACHE: dict[str, Any] = {"host": None, "name": None}
@@ -84,6 +87,8 @@ def _conn_kwargs() -> dict:
         dbname=_pick("PGDATABASE", "LAKEBASE_DATABASE", default="rf_digital_twin"),
         user=user, password=password,
         sslmode=_pick("PGSSLMODE", "LAKEBASE_SSLMODE", default="require"),
+        # Resolve all unqualified table names to the Seattle schema (created by init_schema).
+        options=f"-c search_path={_PG_SCHEMA},public",
     )
 
 
@@ -189,6 +194,9 @@ CREATE TABLE IF NOT EXISTS neighborhoods (
 def init_schema() -> None:
     with connect() as conn:
         with conn.cursor() as cur:
+            # Create the isolated schema first; search_path already points at it so the
+            # CREATE TABLE statements below land in `seattle`, not the shared `public`.
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_PG_SCHEMA}")
             cur.execute(SCHEMA_DDL)
         conn.commit()
 
