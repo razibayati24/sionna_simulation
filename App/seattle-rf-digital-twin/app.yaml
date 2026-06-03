@@ -15,7 +15,7 @@ env:
   # GPU job that renders a neighborhood on demand (cache miss). Set after creating the job
   # from jobs/seattle_render_job.py.
   - name: "SEATTLE_RENDER_JOB_ID"
-    value: ""
+    value: "1101771929091988"
 
   # Workspace host — used to build clickable links into the Jobs UI for in-progress runs.
   - name: "DATABRICKS_WORKSPACE_URL"
