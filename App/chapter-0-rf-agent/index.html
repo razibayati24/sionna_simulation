@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chapter 0 — Sionna RF Agent · Seattle</title>
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;600;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Full-bleed map -->
+  <div id="map"></div>
+
+  <!-- Top chrome -->
+  <header id="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <div class="brand-title">SIONNA&nbsp;RF&nbsp;AGENT</div>
+        <div class="brand-sub">Self-optimizing RAN · Databricks + Sionna RT</div>
+      </div>
+    </div>
+    <div class="chapter">CHAPTER&nbsp;0 — <span id="chapter-name">Booting</span></div>
+    <div class="net-stat">
+      <div><b id="stat-towers">—</b><span>T-Mobile sites</span></div>
+      <div><b>Seattle</b><span>metro</span></div>
+    </div>
+  </header>
+
+  <!-- Cinematic title card -->
+  <div id="titlecard">
+    <div class="tc-inner">
+      <div class="tc-kicker">DATABRICKS × SIONNA RT</div>
+      <h1>The network that fixes itself.</h1>
+      <p>A live RF digital twin of Seattle. When coverage breaks, an agent
+         ray-traces the real geometry, evaluates new radio configs, and
+         recommends the fix — before customers churn.</p>
+      <button id="start-btn">▶ Run the scenario</button>
+      <div class="tc-foot">Tower locations are real (UC&nbsp;·&nbsp;cell_towers). KPIs &amp; configs are illustrative.</div>
+    </div>
+  </div>
+
+  <!-- Alarm toast -->
+  <div id="alarm" class="alarm hidden">
+    <div class="alarm-icon">▲</div>
+    <div class="alarm-body">
+      <div class="alarm-title">CRITICAL · COVERAGE ANOMALY</div>
+      <div class="alarm-text" id="alarm-text"></div>
+    </div>
+  </div>
+
+  <!-- Agent console -->
+  <aside id="console" class="hidden">
+    <div class="con-head">
+      <span class="con-led"></span>
+      <span>AGENT CONSOLE</span>
+      <span class="con-tag" id="con-phase">idle</span>
+    </div>
+    <div class="con-log" id="con-log"></div>
+  </aside>
+
+  <!-- Recommendation card -->
+  <section id="reco" class="hidden">
+    <div class="reco-head">
+      <span class="reco-badge">RECOMMENDED ACTION</span>
+      <span class="reco-site" id="reco-site"></span>
+    </div>
+    <div class="reco-diff" id="reco-diff"></div>
+    <div class="reco-kpis">
+      <div class="kpi" data-k="sinr">
+        <div class="kpi-label">SINR p10</div>
+        <div class="kpi-bar"><i></i></div>
+        <div class="kpi-val"><span class="before">—</span><span class="arrow">→</span><span class="after">—</span><span class="delta"></span></div>
+      </div>
+      <div class="kpi" data-k="rss">
+        <div class="kpi-label">RSS p50</div>
+        <div class="kpi-bar"><i></i></div>
+        <div class="kpi-val"><span class="before">—</span><span class="arrow">→</span><span class="after">—</span><span class="delta"></span></div>
+      </div>
+      <div class="kpi" data-k="edge">
+        <div class="kpi-label">Edge users &lt;0 dB</div>
+        <div class="kpi-bar good"><i></i></div>
+        <div class="kpi-val"><span class="before">—</span><span class="arrow">→</span><span class="after">—</span><span class="delta"></span></div>
+      </div>
+    </div>
+    <div class="reco-why" id="reco-why"></div>
+    <button id="apply-btn">✓ Apply config to Tower #978</button>
+  </section>
+
+  <!-- Replay -->
+  <button id="replay" class="hidden">↻ Replay</button>
+
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
