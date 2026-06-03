@@ -57,6 +57,7 @@ def _build_scene(scene_cfg: dict, cells: list[dict]):
         scene = osm_scene.load_tile_scene(
             tuple(scene_cfg["render_bounds"]), origin,
             out_dir=scene_cfg.get("osm_scene_dir", "/tmp/seattle_osm_scenes"),
+            frequency_hz=float(scene_cfg["frequency_hz"]),
         )
     else:
         import sionna.rt  # noqa: PLC0415

@@ -77,11 +77,17 @@ def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234) -> L
             summary.append({"story": story.name, "hash": config_hash, "status": "skipped"})
             continue
         print(f"  {story.name}: rendering {len(story_cells)} towers …")
-        results = run_simulation(cfg, story_cells)
-        lb.write_render(config_hash, results)
-        print(f"    done in {results['compute_seconds']:.1f}s.")
-        summary.append({"story": story.name, "hash": config_hash,
-                        "seconds": results["compute_seconds"], "status": "rendered"})
+        try:
+            results = run_simulation(cfg, story_cells)
+            lb.write_render(config_hash, results)
+            print(f"    done in {results['compute_seconds']:.1f}s.")
+            summary.append({"story": story.name, "hash": config_hash,
+                            "seconds": results["compute_seconds"], "status": "rendered"})
+        except Exception as e:
+            # One band/material failure shouldn't kill the whole gallery — log and continue.
+            print(f"    FAILED — {type(e).__name__}: {e}")
+            summary.append({"story": story.name, "hash": config_hash,
+                            "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
 
     lb.upsert_neighborhood(neighborhood, status="CACHED", n_towers=len(cells))
     return summary
@@ -119,10 +125,15 @@ def render_coverage(spark, neighborhood: str, batch_index: int = 0, n_batches: i
             summary.append({"tile": tile.tile_id, "hash": config_hash, "status": "skipped"})
             continue
         print(f"[coverage] tile {tile.tile_id}: {len(story_cells)} towers …")
-        results = run_simulation(cfg, story_cells)
-        lb.write_render(config_hash, results)
-        summary.append({"tile": tile.tile_id, "hash": config_hash,
-                        "seconds": results["compute_seconds"], "status": "rendered"})
+        try:
+            results = run_simulation(cfg, story_cells)
+            lb.write_render(config_hash, results)
+            summary.append({"tile": tile.tile_id, "hash": config_hash,
+                            "seconds": results["compute_seconds"], "status": "rendered"})
+        except Exception as e:
+            print(f"[coverage] tile {tile.tile_id} FAILED — {type(e).__name__}: {e}")
+            summary.append({"tile": tile.tile_id, "hash": config_hash,
+                            "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
 
     # Mark CACHED only once the final batch lands.
     final = batch_index >= len(batches) - 1
