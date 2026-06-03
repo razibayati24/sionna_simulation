@@ -17,6 +17,12 @@ Pick the variant whose deployment fits your environment. **Both share the same U
 
 The detailed tradeoffs (concurrent-user scaling, cost shape, hybrid pattern at real scale) are in [Lakebase vs Lakehouse — performance at scale](#lakebase-vs-lakehouse--performance-at-scale).
 
+> **Seattle variant** — [`App/seattle-rf-digital-twin/`](App/seattle-rf-digital-twin/README.md)
+> takes the same Lakebase pipeline real: it ray-traces **2,312 actual T-Mobile towers** (from
+> `cmegdemos_catalog.network_analytics_enablement.cell_towers`) against **OpenStreetMap Seattle
+> buildings**, tiled by neighborhood with the approximation knobs documented below, and renders
+> neighborhoods **on demand** from a dropdown. See its [README](App/seattle-rf-digital-twin/README.md).
+
 ---
 
 ## Architecture (both variants)
@@ -440,6 +446,14 @@ For a metro deployment:
     │   │   └── setup_rf_digital_twin.py            # one-shot Lakebase setup
     │   └── jobs/
     │       └── sionna_compute_job.py               # cache-miss job (Postgres write)
+    │
+    ├── seattle-rf-digital-twin/                    # Seattle variant — real towers + OSM scenes
+    │   ├── README.md                               # neighborhoods, tiling, on-demand render
+    │   ├── app.py                                  # neighborhood + story dropdowns
+    │   ├── neighborhoods.py / towers.py / tiling.py / osm_scene.py
+    │   ├── render_pipeline.py                      # render_stories / render_coverage / calibrate
+    │   ├── setup/setup_seattle_rf_digital_twin.py
+    │   └── jobs/seattle_render_job.py              # on-demand neighborhood render
     │
     └── rf-digital-twin-app-lakehouse/              # Lakehouse variant (UC Delta cache)
         ├── README.md                               # comparison + deployment guide
