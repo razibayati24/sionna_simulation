@@ -59,6 +59,8 @@ lb.init_schema()
 
 # COMMAND ----------
 
+import json
+
 try:
     if mode == "stories":
         summary = rp.render_stories(spark, neighborhood)
@@ -67,28 +69,30 @@ try:
             spark, neighborhood,
             batch_index=batch_index, n_batches=n_batches, tiles_per_batch=tiles_per_batch,
         )
-    print(f"Done — {len([s for s in summary if s.get('status') == 'rendered'])} rendered, "
-          f"{len([s for s in summary if s.get('status') == 'skipped'])} skipped, "
-          f"{len([s for s in summary if s.get('status') == 'FAILED'])} failed.")
-    for s in summary:
-        print(" ", s)
-
-    # Authoritative verification: what's actually cached for this neighborhood now.
-    cached = lb.list_neighborhood_renders(neighborhood)
-    verify = {
-        "neighborhood": neighborhood,
-        "mode": mode,
-        "rendered": len([s for s in summary if s.get("status") == "rendered"]),
-        "skipped": len([s for s in summary if s.get("status") == "skipped"]),
-        "failed": len([s for s in summary if s.get("status") == "FAILED"]),
-        "cached_renders": [
-            {"name": r["name"], "hash": r["config_hash"][:12],
-             "scene_png_bytes": len(r["scene_render_png"]) if r.get("scene_render_png") else 0}
-            for r in cached
-        ],
-        "fail_details": [s for s in summary if s.get("status") == "FAILED"],
-    }
-    dbutils.notebook.exit(json.dumps(verify))
 except Exception as e:
     lb.upsert_neighborhood(neighborhood, status="FAILED", error_message=str(e))
     raise
+
+print(f"Done — {len([s for s in summary if s.get('status') == 'rendered'])} rendered, "
+      f"{len([s for s in summary if s.get('status') == 'skipped'])} skipped, "
+      f"{len([s for s in summary if s.get('status') == 'FAILED'])} failed.")
+for s in summary:
+    print(" ", s)
+
+# Authoritative verification: what's actually cached for this neighborhood now.
+# Outside the try so a reporting glitch can't flip the neighborhood status to FAILED.
+cached = lb.list_neighborhood_renders(neighborhood)
+verify = {
+    "neighborhood": neighborhood,
+    "mode": mode,
+    "rendered": len([s for s in summary if s.get("status") == "rendered"]),
+    "skipped": len([s for s in summary if s.get("status") == "skipped"]),
+    "failed": len([s for s in summary if s.get("status") == "FAILED"]),
+    "cached_renders": [
+        {"name": r["name"], "hash": r["config_hash"][:12],
+         "scene_png_bytes": len(r["scene_render_png"]) if r.get("scene_render_png") else 0}
+        for r in cached
+    ],
+    "fail_details": [s for s in summary if s.get("status") == "FAILED"],
+}
+dbutils.notebook.exit(json.dumps(verify))
