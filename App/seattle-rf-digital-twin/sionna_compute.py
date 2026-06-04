@@ -89,15 +89,22 @@ def _build_scene(scene_cfg: dict, cells: list[dict]):
     return scene
 
 
-def _camera_for(scene_cfg: dict):
-    """Top-down camera framed over the tile center (etoile camera if no bounds)."""
+def _camera_for(scene_cfg: dict, cells: list[dict] | None = None):
+    """Top-down camera framed on the towers (so they separate visually), else the tile."""
     from sionna.rt import Camera
 
+    if cells:
+        xs = [float(c["x"]) for c in cells]
+        ys = [float(c["y"]) for c in cells]
+        cx, cy = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+        span = max(max(xs) - min(xs), max(ys) - min(ys), 200.0)
+        alt = span * 1.25 + 350.0
+        return Camera(position=[cx, cy, alt],
+                      orientation=np.array([0.0, np.pi / 2, -np.pi / 2]))
     rb = scene_cfg.get("render_bounds")
     if rb:
         x_lo, x_hi, y_lo, y_hi = rb
         cx, cy = (x_lo + x_hi) / 2.0, (y_lo + y_hi) / 2.0
-        # Altitude ~ the larger span so the whole tile is in frame.
         alt = max(x_hi - x_lo, y_hi - y_lo) * 1.3 + 300.0
         return Camera(position=[cx, cy, alt],
                       orientation=np.array([0.0, np.pi / 2, -np.pi / 2]))
@@ -105,9 +112,46 @@ def _camera_for(scene_cfg: dict):
                   orientation=np.array([0.0, np.pi / 2, -np.pi / 2]))
 
 
-def _scene_render_png(scene, radio_map, scene_cfg) -> bytes:
+def _cell_transform(radio_map):
+    """Return a fn mapping local-meter (x, y) → radio-map (col, row) for 2D overlays.
+
+    Matches the (col, row) convention the user-position scatter already uses.
+    """
+    cc = np.asarray(radio_map.cell_centers)          # [rows, cols, 3], world meters
+    ox, oy = float(cc[0, 0, 0]), float(cc[0, 0, 1])
+    dx = float(cc[0, 1, 0] - cc[0, 0, 0]) if cc.shape[1] > 1 else 1.0
+    dy = float(cc[1, 0, 1] - cc[0, 0, 1]) if cc.shape[0] > 1 else 1.0
+    dx = dx or 1.0
+    dy = dy or 1.0
+
+    def to_cell(wx: float, wy: float):
+        return ((wx - ox) / dx, (wy - oy) / dy)
+
+    return to_cell
+
+
+def _draw_overlays(ax, radio_map, polys, cells) -> None:
+    """Draw OSM building outlines + TX markers on a 2D radio-map axis (best-effort)."""
+    try:
+        to_cell = _cell_transform(radio_map)
+    except Exception as e:
+        print(f"[overlay] cell transform unavailable ({e}); skipping building/TX overlay.")
+        return
+    if polys:
+        for ring, _h in polys:
+            pts = [to_cell(float(p[0]), float(p[1])) for p in ring]
+            xs = [p[0] for p in pts] + [pts[0][0]]
+            ys = [p[1] for p in pts] + [pts[0][1]]
+            ax.plot(xs, ys, color="white", linewidth=0.4, alpha=0.45)
+    for c in cells:
+        cx, cy = to_cell(float(c["x"]), float(c["y"]))
+        ax.plot(cx, cy, marker="^", color="red", markersize=6,
+                markeredgecolor="black", markeredgewidth=0.5, linestyle="")
+
+
+def _scene_render_png(scene, radio_map, scene_cfg, cells) -> bytes:
     fig = scene.render(
-        camera=_camera_for(scene_cfg), radio_map=radio_map, rm_metric="sinr",
+        camera=_camera_for(scene_cfg, cells), radio_map=radio_map, rm_metric="sinr",
         rm_vmin=-10, rm_vmax=60, rm_show_color_bar=True,
     )
     if fig is None:
@@ -115,7 +159,8 @@ def _scene_render_png(scene, radio_map, scene_cfg) -> bytes:
     return _fig_to_png(fig)
 
 
-def _association_png(radio_map, num_user_samples, min_sinr_db, min_dist, max_dist):
+def _association_png(radio_map, num_user_samples, min_sinr_db, min_dist, max_dist,
+                     polys=None, cells=None):
     pos, cell_ids = radio_map.sample_positions(
         num_pos=num_user_samples, metric="sinr", min_val_db=min_sinr_db,
         min_dist=min_dist, max_dist=max_dist, tx_association=True,
@@ -126,6 +171,7 @@ def _association_png(radio_map, num_user_samples, min_sinr_db, min_dist, max_dis
     for tx, ids in enumerate(cell_ids_np):
         fig.axes[0].plot(ids[:, 1], ids[:, 0], marker="o", markersize=2,
                          linestyle="", color=cmap[tx % len(cmap)])
+    _draw_overlays(fig.axes[0], radio_map, polys, cells or [])
     users_per_tx = {int(tx): int((ids != 0).any(axis=1).sum())
                     for tx, ids in enumerate(cell_ids_np)}
     return _fig_to_png(fig), {"users_per_tx": users_per_tx}
@@ -163,14 +209,33 @@ def run_simulation(scene_cfg: dict, cells: list[dict]) -> dict[str, Any]:
         cell_size=(float(scene_cfg["cell_size_x"]), float(scene_cfg["cell_size_y"])),
     )
 
-    scene_png = _scene_render_png(scene, radio_map, scene_cfg)
-    sinr_map_png = _fig_to_png(radio_map.show_association("sinr"))
+    # Building footprints for the 2D-map overlays (local meters; same frame as cells).
+    polys = None
+    if scene_cfg.get("use_osm") and scene_cfg.get("render_bounds"):
+        try:
+            import osm_scene  # noqa: PLC0415
+            polys = osm_scene.get_tile_buildings(
+                tuple(scene_cfg["render_bounds"]),
+                (float(scene_cfg["origin_lat"]), float(scene_cfg["origin_lon"])),
+                out_dir=scene_cfg.get("osm_scene_dir", "/tmp/seattle_osm_scenes"),
+                frequency_hz=float(scene_cfg["frequency_hz"]),
+            )
+        except Exception as e:
+            print(f"[overlay] could not load building footprints: {e}")
+
+    scene_png = _scene_render_png(scene, radio_map, scene_cfg, cells)
+
+    assoc_fig = radio_map.show_association("sinr")
+    _draw_overlays(assoc_fig.axes[0], radio_map, polys, cells)
+    sinr_map_png = _fig_to_png(assoc_fig)
+
     association_png, assoc_kpis = _association_png(
         radio_map,
         num_user_samples=int(scene_cfg["num_user_samples"]),
         min_sinr_db=float(scene_cfg["min_sinr_db"]),
         min_dist=float(scene_cfg["min_user_dist_m"]),
         max_dist=float(scene_cfg["max_user_dist_m"]),
+        polys=polys, cells=cells,
     )
     sinr_cdf_png, sinr_pct = _cdf_png(radio_map, "sinr", xlim=(-40.0, 75.0))
     rss_cdf_png, rss_pct = _cdf_png(radio_map, "rss", xlim=(-150.0, 25.0))
