@@ -252,8 +252,11 @@ def build_tile_scene_xml(render_bounds, origin, out_dir: str,
     ground.export(os.path.join(mesh_dir, "ground.ply"))
     shapes.append(("ground.ply", ground_mat))
 
-    # Buildings (best-effort).
+    # Buildings (best-effort). Persist the footprints next to the scene so the 2D
+    # radio-map plots can draw them without re-hitting Overpass.
     polys = fetch_buildings(render_bounds, origin)
+    with open(os.path.join(scene_dir, "buildings.json"), "w") as f:
+        json.dump([[list(map(list, ring)), h] for ring, h in polys], f)
     buildings = _extrude_buildings(polys)
     if buildings is not None:
         buildings.export(os.path.join(mesh_dir, "buildings.ply"))
@@ -274,3 +277,24 @@ def load_tile_scene(render_bounds, origin, out_dir: str = "/tmp/seattle_osm_scen
 
     xml_path = build_tile_scene_xml(render_bounds, origin, out_dir, frequency_hz=frequency_hz)
     return load_scene(xml_path)
+
+
+def get_tile_buildings(render_bounds, origin, out_dir: str = "/tmp/seattle_osm_scenes",
+                       frequency_hz: Optional[float] = None) -> List[Tuple[list, float]]:
+    """Return the tile's building footprints (local meters) for 2D plot overlays.
+
+    Reads the ``buildings.json`` written by ``build_tile_scene_xml`` (so no extra Overpass
+    call); falls back to a live fetch if it isn't there yet.
+    """
+    ground_mat = _ground_material(frequency_hz)
+    key = hashlib.sha1(
+        json.dumps([render_bounds, origin, ground_mat], sort_keys=True).encode()
+    ).hexdigest()[:16]
+    path = os.path.join(out_dir, key, "buildings.json")
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return [(ring, h) for ring, h in json.load(f)]
+        except Exception:
+            pass
+    return fetch_buildings(render_bounds, origin)
