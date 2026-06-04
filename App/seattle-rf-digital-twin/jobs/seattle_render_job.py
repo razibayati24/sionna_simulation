@@ -35,6 +35,7 @@ dbutils.widgets.text("mode", "coverage")
 dbutils.widgets.text("batch_index", "0")
 dbutils.widgets.text("n_batches", "1")
 dbutils.widgets.text("tiles_per_batch", "")
+dbutils.widgets.text("force", "false")
 
 neighborhood = dbutils.widgets.get("neighborhood")
 mode = dbutils.widgets.get("mode")
@@ -42,8 +43,10 @@ batch_index = int(dbutils.widgets.get("batch_index") or "0")
 n_batches = int(dbutils.widgets.get("n_batches") or "1")
 _tpb = dbutils.widgets.get("tiles_per_batch")
 tiles_per_batch = int(_tpb) if _tpb.strip() else None
+force = dbutils.widgets.get("force").strip().lower() in ("true", "1", "yes")
 
-print(f"neighborhood={neighborhood} mode={mode} batch={batch_index}/{n_batches} tpb={tiles_per_batch}")
+print(f"neighborhood={neighborhood} mode={mode} batch={batch_index}/{n_batches} "
+      f"tpb={tiles_per_batch} force={force}")
 
 # COMMAND ----------
 
@@ -63,11 +66,12 @@ import json
 
 try:
     if mode == "stories":
-        summary = rp.render_stories(spark, neighborhood)
+        summary = rp.render_stories(spark, neighborhood, force=force)
     else:
         summary = rp.render_coverage(
             spark, neighborhood,
             batch_index=batch_index, n_batches=n_batches, tiles_per_batch=tiles_per_batch,
+            force=force,
         )
 except Exception as e:
     lb.upsert_neighborhood(neighborhood, status="FAILED", error_message=str(e))
