@@ -19,8 +19,11 @@ optional geometry deps are missing, we still emit a **flat ground-plane** scene 
 render never hard-fails — the tile just loses its buildings. Generated scenes are cached on
 disk keyed by the bbox so re-renders skip the network round-trip.
 
-Optional deps (declared in requirements.txt): ``requests``, ``shapely``, ``trimesh``.
-Sionna's ``load_scene`` consumes the XML this module writes.
+Optional deps (installed by the setup notebook / render job): ``requests``, ``shapely``,
+``trimesh`` and a triangulation backend (``mapbox_earcut``) — without the latter,
+``trimesh.creation.extrude_polygon`` raises "No available triangulation engine!" and every
+building silently drops to the flat-ground fallback. Sionna's ``load_scene`` consumes the
+XML this module writes.
 """
 from __future__ import annotations
 
