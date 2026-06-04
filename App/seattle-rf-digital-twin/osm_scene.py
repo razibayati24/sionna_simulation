@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from typing import List, Optional, Tuple
 
 import neighborhoods as nb
@@ -115,12 +116,27 @@ def fetch_buildings(render_bounds, origin, timeout: float = 60.0
         f'(way["building"]({south},{west},{north},{east}););'
         f"out body geom;"
     )
-    try:
-        resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=timeout + 10)
-        resp.raise_for_status()
-        elements = resp.json().get("elements", [])
-    except Exception as e:
-        print(f"[osm_scene] Overpass fetch failed ({e}); falling back to ground-only.")
+    # Overpass returns 406 Not Acceptable without a User-Agent. A couple of mirrors are
+    # tried with simple backoff so a single slow/rate-limited endpoint doesn't drop the
+    # tile's buildings.
+    headers = {"User-Agent": "seattle-rf-digital-twin/1.0 (Databricks Sionna demo)"}
+    endpoints = [OVERPASS_URL]
+    for extra in ("https://overpass-api.de/api/interpreter",
+                  "https://overpass.kumi.systems/api/interpreter"):
+        if extra not in endpoints:
+            endpoints.append(extra)
+    elements = None
+    for attempt, url in enumerate(endpoints):
+        try:
+            resp = requests.post(url, data={"data": query}, headers=headers, timeout=timeout + 10)
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            break
+        except Exception as e:
+            print(f"[osm_scene] Overpass fetch via {url} failed ({e}); trying next endpoint.")
+            time.sleep(1.5 * (attempt + 1))
+    if elements is None:
+        print("[osm_scene] all Overpass endpoints failed; falling back to ground-only.")
         return []
 
     polys: List[Tuple[list, float]] = []

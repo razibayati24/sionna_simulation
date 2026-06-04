@@ -55,8 +55,13 @@ def _core_tile(neighborhood: str, cells: List[dict]) -> Tuple["tiling.Tile", Lis
     return max(assigned, key=lambda tc: len(tc[1]))
 
 
-def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234) -> List[dict]:
-    """Render the curated story gallery for a neighborhood's core tile."""
+def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234,
+                   force: bool = False) -> List[dict]:
+    """Render the curated story gallery for a neighborhood's core tile.
+
+    ``force=True`` re-renders even if a row is already cached (e.g. to refresh renders
+    after a scene-geometry fix that doesn't change the config_hash).
+    """
     hood = nb.get(neighborhood)
     cells = towers.load_towers(neighborhood, spark, seed=seed)
     lb.upsert_neighborhood(neighborhood, status="RENDERING", n_towers=len(cells))
@@ -72,7 +77,7 @@ def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234) -> L
             continue
         cfg = _scene_cfg(story, hood, tile)
         _, config_hash = lb.upsert_scene_config(cfg, story_cells, is_preset=True)
-        if _is_cached(config_hash):
+        if not force and _is_cached(config_hash):
             print(f"  {story.name}: already cached ({config_hash[:12]}).")
             summary.append({"story": story.name, "hash": config_hash, "status": "skipped"})
             continue
@@ -94,7 +99,8 @@ def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234) -> L
 
 
 def render_coverage(spark, neighborhood: str, batch_index: int = 0, n_batches: int = 1,
-                    tiles_per_batch: Optional[int] = None, seed: int = 1234) -> List[dict]:
+                    tiles_per_batch: Optional[int] = None, seed: int = 1234,
+                    force: bool = False) -> List[dict]:
     """Render one batch of a neighborhood's coverage tiles (baseline story per tile)."""
     hood = nb.get(neighborhood)
     cells = towers.load_towers(neighborhood, spark, seed=seed)
@@ -121,7 +127,7 @@ def render_coverage(spark, neighborhood: str, batch_index: int = 0, n_batches: i
         cfg["story_key"] = f"coverage_{tile.tile_id}"
         cfg["name"] = f"Coverage · {neighborhood} · tile {tile.tile_id}"
         _, config_hash = lb.upsert_scene_config(cfg, story_cells, is_preset=False)
-        if _is_cached(config_hash):
+        if not force and _is_cached(config_hash):
             summary.append({"tile": tile.tile_id, "hash": config_hash, "status": "skipped"})
             continue
         print(f"[coverage] tile {tile.tile_id}: {len(story_cells)} towers …")
