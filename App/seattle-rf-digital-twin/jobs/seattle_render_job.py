@@ -22,7 +22,7 @@
 # COMMAND ----------
 
 # MAGIC %pip install --quiet drjit mitsuba sionna-rt "psycopg[binary]>=3.1.18" \
-# MAGIC   "databricks-sdk>=0.55.0" requests shapely trimesh
+# MAGIC   "databricks-sdk>=0.55.0" requests shapely trimesh mapbox_earcut
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------

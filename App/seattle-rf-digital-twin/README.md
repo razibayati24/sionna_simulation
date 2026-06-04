@@ -61,9 +61,11 @@ App/seattle-rf-digital-twin/
     └── seattle_render_job.py              # on-demand neighborhood render (app triggers this)
 ```
 
-> The OSM + Sionna deps (`drjit`, `mitsuba`, `sionna-rt`, `requests`, `shapely`, `trimesh`)
-> are installed by the **setup notebook and render job** via `%pip` — the app process itself
-> only reads from Lakebase, so its `requirements.txt` stays light.
+> The OSM + Sionna deps (`drjit`, `mitsuba`, `sionna-rt`, `requests`, `shapely`, `trimesh`,
+> `mapbox_earcut`) are installed by the **setup notebook and render job** via `%pip` — the app
+> process itself only reads from Lakebase, so its `requirements.txt` stays light.
+> `mapbox_earcut` is the triangulation backend `trimesh` needs to extrude building footprints;
+> without it every building silently drops to the flat-ground fallback.
 
 ## Deploy
 
