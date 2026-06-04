@@ -308,7 +308,7 @@ function showReco() {
     "The new building threw a <b>diffraction shadow</b> across sector A. Ray-tracing the actual " +
     "geometry shows a 6° down-tilt cuts overshoot interference, re-pointing azimuth to <b>138°</b> " +
     "fills the street-canyon gap behind the obstruction, and <b>+2 dB</b> offsets penetration loss — " +
-    "restoring edge reliability <b>without a new site</b>.";
+    "<b>projected to restore</b> edge reliability without a new site. Recommended for engineer review.";
 
   $("#reco").classList.remove("hidden");
   requestAnimationFrame(() => $("#reco").classList.add("show"));
@@ -347,21 +347,18 @@ function pulseHero() {
 // --------------------------------------------------------------------------
 function applyConfig() {
   const b = $("#apply-btn");
-  b.textContent = "✓ Config pushed · NR-978 re-optimized";
+  b.textContent = "✓ Sent to RF engineer · awaiting review";
   b.classList.add("done");
-  paint("sector-fill", "fill-opacity", 0.28);
-  paint("bldg-fill", "fill-opacity", 0.4);
-  $("#alarm").classList.remove("show");
-  setTimeout(() => $("#alarm").classList.add("hidden"), 500);
-  if (heroMarker) { const l = heroMarker.getElement().querySelector(".hero-label"); if (l) { l.textContent = "✓ NR-978 · optimized"; l.style.background = "rgba(52,232,158,.92)"; } }
-  $("#chapter-name").textContent = "Resolved";
+  paint("sector-fill", "fill-opacity", 0.26);
+  if (heroMarker) { const l = heroMarker.getElement().querySelector(".hero-label"); if (l) { l.textContent = "NR-978 · change proposed"; l.style.background = "rgba(52,232,158,.92)"; } }
+  $("#chapter-name").textContent = "Handed to RF engineer";
 }
 
 function reset() {
   ["#alarm", "#console", "#reco"].forEach((s) => { $(s).classList.remove("show"); $(s).classList.add("hidden"); });
   $("#replay").classList.add("hidden");
   logEl().innerHTML = "";
-  const b = $("#apply-btn"); b.textContent = "✓ Apply config to Tower #978"; b.classList.remove("done");
+  const b = $("#apply-btn"); b.textContent = "✉ Send recommendation to RF engineer"; b.classList.remove("done");
   if (heroMarker) { heroMarker.remove(); heroMarker = null; }
   ["cover-fill", "cover-line", "sector-fill", "bldg-fill", "bldg-line"].forEach((l) => {
     const p = l.endsWith("line") ? "line-opacity" : "fill-opacity"; paint(l, p, 0);

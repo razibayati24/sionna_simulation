@@ -1,8 +1,11 @@
 # Chapter 0 — Sionna RF Agent (Seattle)
 
-A cinematic, self-running showcase that opens the Sionna RF story: **"the network
-that fixes itself."** It's the prequel to the [`rf-digital-twin-app`](../rf-digital-twin-app-lakehouse) —
-where that app lets you drive the digital twin by hand, Chapter 0 shows *why* it matters.
+A cinematic, self-running showcase that positions the app as an **RF Optimization
+Agent** — an AI agent that diagnoses a coverage problem, ray-traces candidate fixes,
+and hands the RF engineer a recommended change with the reasoning behind it.
+The engineer stays in the loop and decides. It's the prequel to the
+[`rf-digital-twin-app`](../rf-digital-twin-app-lakehouse) — where that app lets you
+drive the digital twin by hand, Chapter 0 shows *why* it matters.
 
 ## The narrative (auto-plays)
 
@@ -15,7 +18,9 @@ where that app lets you drive the digital twin by hand, Chapter 0 shows *why* it
    telemetry with the 3D scene, reads the current radio config + KPIs, then ray-traces
    candidate configs with **Sionna RT on Databricks** and scores them.
 5. **Recommendation** — a card animates in with the config diff (tilt / azimuth / power)
-   and the *why*, with before→after SINR p10, RSS p50, and edge-user KPIs.
+   and the *why*, with projected before→after SINR p10, RSS p50, and edge-user KPIs.
+   The engineer reviews and sends it on — the assistant advises, it doesn't act on
+   the live network itself.
 
 ## What's real vs. illustrative
 
