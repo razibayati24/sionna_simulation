@@ -15,13 +15,13 @@ env:
   - name: "SIONNA_JOB_ID"
     value: "417222810044410"
 
-  # (Optional) Databricks Job that runs the NVlabs sionna-large-radio-maps
-  # pipeline for the "Large-scale map" tab on a GPU cluster. When UNSET, that
-  # tab computes a GPU-free synthetic demo inline instead. Set this to the
-  # job id created from jobs/large_scale_compute_job.py to enable real
-  # Sionna RT large-scale ray tracing.
-  # - name: "LARGE_SCALE_JOB_ID"
-  #   value: "<job-id>"
+  # Databricks Job that runs the NVlabs sionna-large-radio-maps pipeline for
+  # the "Large-scale map" tab on a GPU cluster. When UNSET, that tab computes a
+  # GPU-free synthetic demo inline instead. Created from
+  # jobs/large_scale_compute_job.py — enables real Sionna RT large-scale ray
+  # tracing on a cache miss.
+  - name: "LARGE_SCALE_JOB_ID"
+    value: "579716766302610"
 
   # Workspace host — used to build clickable links into the Databricks Jobs UI
   # for in-progress runs.
