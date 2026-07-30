@@ -303,16 +303,22 @@ def _cdf_png(values: np.ndarray, label: str, xlim: tuple[float, float]) -> tuple
 # Real path — drives the NVlabs sionna_lrm CLI on a GPU cluster
 # ---------------------------------------------------------------------------
 
-# The NVlabs repo declares its full dependency set in pyproject.toml (sionna-rt,
-# geopandas, shapely, osmnx, tqdm, scipy, basemap, open3d, triangle, …). We
-# install the repo itself into an ISOLATED prefix so pip resolves that exact
-# set — rather than hand-maintaining a partial list — and run the scripts
-# against it. Kept OUT of the notebook kernel: this stack drags in a numpy build
+# The NVlabs repo's runtime dependencies, mirrored from its pyproject.toml
+# [project].dependencies. We install THESE into an isolated prefix (not the repo
+# itself: its pyproject uses the SPDX `license = "Apache-2.0"` form that the
+# cluster's older setuptools rejects at wheel-build time, and we don't need the
+# repo as an installed package — `sionna_lrm` imports directly from repo_dir on
+# PYTHONPATH). Kept OUT of the notebook kernel: this stack drags in a numpy build
 # ABI-incompatible with the runtime's precompiled numpy/pyarrow, which crashes
 # the kernel REPL. numpy is pinned <2 because the prefix's pandas transitively
 # imports the runtime's pyarrow (compiled against numpy 1.x); numpy 2.x there
 # raises "module compiled using NumPy 1.x cannot be run in NumPy 2.x".
-_SUBPROC_PIN = ["numpy<2"]
+_SUBPROC_PACKAGES = [
+    "numpy<2",
+    "sionna-rt==1.2.1",
+    "basemap", "boto3", "geopandas", "matplotlib", "pandas", "Pillow",
+    "pyproj", "scipy", "shapely", "tqdm", "open3d", "triangle", "osmnx",
+]
 
 
 def _run_checked(cmd: list[str], env: dict | None = None) -> None:
@@ -345,11 +351,11 @@ def _ensure_subproc_env(repo_dir: str) -> tuple[str, str]:
         return sys.executable, pythonpath
 
     os.makedirs(prefix, exist_ok=True)
-    print(f"Installing NVlabs repo + deps into isolated prefix {prefix} …", flush=True)
-    # Install the repo (pulls its full pyproject.toml dependency set) plus the
-    # numpy pin, all into the prefix. --target keeps it out of the kernel.
+    print(f"Installing NVlabs deps into isolated prefix {prefix} …", flush=True)
+    # Install the declared dependency set into the prefix. --target keeps it out
+    # of the kernel; the repo code itself imports from repo_dir on PYTHONPATH.
     _run_checked([sys.executable, "-m", "pip", "install",
-                  "--target", prefix, *_SUBPROC_PIN, repo_dir])
+                  "--target", prefix, *_SUBPROC_PACKAGES])
     open(marker, "w").write("ok")
     return sys.executable, pythonpath
 
