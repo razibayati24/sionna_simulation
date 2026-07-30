@@ -55,6 +55,13 @@ layout — by wrapping NVIDIA's
 pipeline (adaptive tiling → OSM scene build → per-tile ray tracing → mosaic).
 This complements the single synthetic `etoile` scene the other tabs use.
 
+The tab renders an **interactive, zoomable Leaflet map** (OSM/CARTO street
+basemap) with the coverage raster as a georeferenced image overlay on the
+region's bounding box, base-station markers, an opacity slider to fade the
+coverage against the streets underneath, and a colour-bar legend — the same
+overlay-on-slippy-map idea as the NVlabs project. Pan/zoom just like any web
+map; the tiling preview, coverage CDF, and a KPI table sit below it.
+
 Configure a region in the sidebar's **Large-scale map** section (preset +
 editable bbox / frequency / TX power), then click **Compute large-scale map**.
 Two execution paths, chosen automatically:

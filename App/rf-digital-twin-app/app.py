@@ -66,6 +66,115 @@ def _png_img(data: bytes | memoryview | None, alt: str) -> ui.Tag:
     )
 
 
+def _as_b64(data: bytes | memoryview | None) -> str | None:
+    """Base64-encode PNG bytes for a data URI, or None."""
+    if not data:
+        return None
+    if isinstance(data, memoryview):
+        data = bytes(data)
+    return base64.b64encode(data).decode("ascii")
+
+
+def _as_obj(value: Any) -> Any:
+    """Coerce a JSONB column (already parsed) or a JSON string to a Python obj."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, str)):
+        try:
+            return json.loads(value)
+        except Exception:  # noqa: BLE001
+            return None
+    return value
+
+
+def _leaflet_map_html(overlay_b64: str | None, bounds: list | None,
+                      base_stations: list | None, legend_b64: str | None,
+                      title: str) -> str:
+    """Build a self-contained Leaflet HTML doc for an <iframe srcdoc>.
+
+    Renders a pannable/zoomable OSM basemap with the coverage raster as a
+    georeferenced image overlay on `bounds` ([south, west, north, east]),
+    base-station markers, an opacity slider, and a colour-bar legend — the
+    same overlay-on-slippy-map idea as NVlabs sionna-large-radio-maps.
+    """
+    if not overlay_b64 or not bounds:
+        return (
+            "<!DOCTYPE html><html><body style='font-family:sans-serif;"
+            "color:#888;padding:24px'>No coverage computed yet — click "
+            "“Compute large-scale map” in the sidebar.</body></html>"
+        )
+
+    south, west, north, east = bounds
+    bs_json = json.dumps(base_stations or [])
+    legend_html = (
+        f"<img src='data:image/png;base64,{legend_b64}' "
+        f"style='width:220px;display:block'/>" if legend_b64 else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html,body,#map {{ height:100%; margin:0; }}
+  .info-box {{ background:rgba(255,255,255,0.9); padding:6px 8px;
+              border-radius:4px; font:12px/1.3 sans-serif; box-shadow:0 1px 4px rgba(0,0,0,0.3); }}
+  .info-box input {{ width:120px; vertical-align:middle; }}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+  var south={south}, west={west}, north={north}, east={east};
+  var bounds = [[south, west], [north, east]];
+  var map = L.map('map');
+  L.tileLayer('https://{{s}}.basemaps.cartocdn.com/rastertiles/voyager/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+    attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 20
+  }}).addTo(map);
+
+  var overlay = L.imageOverlay(
+    'data:image/png;base64,{overlay_b64}', bounds, {{ opacity: 0.7, interactive: false }}
+  ).addTo(map);
+  map.fitBounds(bounds);
+
+  // Base-station markers.
+  var stations = {bs_json};
+  stations.forEach(function(s, i) {{
+    L.circleMarker([s[0], s[1]], {{
+      radius: 5, color: '#d62728', weight: 1.5, fillColor: '#ff4136', fillOpacity: 0.9
+    }}).addTo(map).bindPopup('Base station ' + (i+1) + '<br/>' +
+        s[0].toFixed(5) + ', ' + s[1].toFixed(5));
+  }});
+
+  // Opacity control.
+  var opacityCtl = L.control({{ position: 'topright' }});
+  opacityCtl.onAdd = function() {{
+    var d = L.DomUtil.create('div', 'info-box');
+    d.innerHTML = '<b>{title}</b><br/>Coverage opacity ' +
+      '<input type="range" min="0" max="100" value="70" id="op"/>';
+    L.DomEvent.disableClickPropagation(d);
+    return d;
+  }};
+  opacityCtl.addTo(map);
+  document.getElementById('op').addEventListener('input', function(e) {{
+    overlay.setOpacity(e.target.value / 100);
+  }});
+
+  // Legend.
+  var legendCtl = L.control({{ position: 'bottomright' }});
+  legendCtl.onAdd = function() {{
+    var d = L.DomUtil.create('div', 'info-box');
+    d.innerHTML = "{legend_html}";
+    return d;
+  }};
+  legendCtl.addTo(map);
+</script>
+</body>
+</html>"""
+
+
 def _collect_scene(input) -> dict:
     return {
         "name": "Custom",
@@ -837,6 +946,21 @@ def server(input, output, session):
             if kpi_rows else ""
         )
 
+        # Interactive, zoomable Leaflet map: OSM basemap + georeferenced
+        # coverage overlay + base-station markers (like NVlabs sionna_lrm).
+        map_html = _leaflet_map_html(
+            overlay_b64=_as_b64(data.get("overlay_png")),
+            bounds=_as_obj(data.get("bounds_json")),
+            base_stations=_as_obj(data.get("base_stations_json")),
+            legend_b64=_as_b64(data.get("legend_png")),
+            title=str(kpis.get("region") or "Coverage"),
+        )
+        map_frame = ui.tags.iframe(
+            srcdoc=map_html,
+            style="width:100%; height:560px; border:1px solid #ddd; "
+                  "border-radius:6px;",
+        )
+
         return ui.div(
             ui.h4("Large-scale radio map — NVIDIA sionna-large-radio-maps"),
             ui.tags.p(status_text, style="color:#555; font-size:13px;"),
@@ -846,18 +970,22 @@ def server(input, output, session):
                 style="color:#c00; padding:8px; border:1px solid #c00; "
                       "border-radius:4px; margin:8px 0;",
             ) if error_text else "",
+            ui.tags.p(
+                "Pan and zoom the map; drag the opacity slider (top-right) to "
+                "fade the coverage layer against the streets underneath.",
+                style="color:#777; font-size:12px; margin-bottom:6px;",
+            ),
+            map_frame,
             ui.row(
-                ui.column(7,
-                    ui.h5("Coverage"),
-                    _png_img(data.get("coverage_png"), "large-scale coverage map"),
-                ),
-                ui.column(5,
-                    ui.h5("Adaptive tiling"),
+                ui.column(6,
+                    ui.h5("Adaptive tiling", style="margin-top:16px;"),
                     _png_img(data.get("tiling_png"), "tiling preview"),
                 ),
+                ui.column(6,
+                    ui.h5("Coverage CDF", style="margin-top:16px;"),
+                    _png_img(data.get("cdf_png"), "coverage CDF"),
+                ),
             ),
-            ui.h5("Coverage CDF", style="margin-top:16px;"),
-            _png_img(data.get("cdf_png"), "coverage CDF"),
             kpi_table,
         )
 

@@ -193,13 +193,23 @@ CREATE TABLE IF NOT EXISTS large_scale_maps (
     region_name     TEXT,
     region_json     JSONB,
     coverage_png    BYTEA,
+    overlay_png     BYTEA,          -- north-up RGBA raster for the Leaflet overlay
+    legend_png      BYTEA,          -- standalone colour-bar legend
     tiling_png      BYTEA,
     cdf_png         BYTEA,
+    bounds_json     JSONB,          -- [south, west, north, east]
+    base_stations_json JSONB,       -- [[lat, lon], ...]
     kpis_json       JSONB,
     compute_seconds DOUBLE PRECISION,
     is_demo         BOOLEAN NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Backfill columns on pre-existing installs (idempotent).
+ALTER TABLE large_scale_maps ADD COLUMN IF NOT EXISTS overlay_png BYTEA;
+ALTER TABLE large_scale_maps ADD COLUMN IF NOT EXISTS legend_png BYTEA;
+ALTER TABLE large_scale_maps ADD COLUMN IF NOT EXISTS bounds_json JSONB;
+ALTER TABLE large_scale_maps ADD COLUMN IF NOT EXISTS base_stations_json JSONB;
 """
 
 
@@ -427,19 +437,26 @@ def write_large_scale_map(region_hash: str, region: dict, results: dict) -> None
                 """
                 INSERT INTO large_scale_maps (
                     region_hash, region_name, region_json,
-                    coverage_png, tiling_png, cdf_png,
+                    coverage_png, overlay_png, legend_png, tiling_png, cdf_png,
+                    bounds_json, base_stations_json,
                     kpis_json, compute_seconds, is_demo
                 ) VALUES (
                     %(region_hash)s, %(region_name)s, %(region_json)s,
-                    %(coverage_png)s, %(tiling_png)s, %(cdf_png)s,
+                    %(coverage_png)s, %(overlay_png)s, %(legend_png)s,
+                    %(tiling_png)s, %(cdf_png)s,
+                    %(bounds_json)s, %(base_stations_json)s,
                     %(kpis_json)s, %(compute_seconds)s, %(is_demo)s
                 )
                 ON CONFLICT (region_hash) DO UPDATE SET
                     region_name     = EXCLUDED.region_name,
                     region_json     = EXCLUDED.region_json,
                     coverage_png    = EXCLUDED.coverage_png,
+                    overlay_png     = EXCLUDED.overlay_png,
+                    legend_png      = EXCLUDED.legend_png,
                     tiling_png      = EXCLUDED.tiling_png,
                     cdf_png         = EXCLUDED.cdf_png,
+                    bounds_json     = EXCLUDED.bounds_json,
+                    base_stations_json = EXCLUDED.base_stations_json,
                     kpis_json       = EXCLUDED.kpis_json,
                     compute_seconds = EXCLUDED.compute_seconds,
                     is_demo         = EXCLUDED.is_demo,
@@ -450,8 +467,12 @@ def write_large_scale_map(region_hash: str, region: dict, results: dict) -> None
                     "region_name":     region.get("name"),
                     "region_json":     json.dumps(region),
                     "coverage_png":    results.get("coverage_png"),
+                    "overlay_png":     results.get("overlay_png"),
+                    "legend_png":      results.get("legend_png"),
                     "tiling_png":      results.get("tiling_png"),
                     "cdf_png":         results.get("cdf_png"),
+                    "bounds_json":     results.get("bounds_json"),
+                    "base_stations_json": results.get("base_stations_json"),
                     "kpis_json":       results.get("kpis_json"),
                     "compute_seconds": results.get("compute_seconds"),
                     "is_demo":         bool(results.get("is_demo", False)),

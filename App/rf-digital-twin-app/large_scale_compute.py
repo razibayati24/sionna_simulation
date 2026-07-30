@@ -146,9 +146,11 @@ def _demo(region_cfg: dict) -> dict[str, Any]:
         rss = tx_power_dbm - path_loss + shadow
         best_rss = np.maximum(best_rss, rss)
 
-    vmin, vmax = DEFAULT_RM_DB_VMIN, DEFAULT_RM_DB_VMAX
+    # RSS demo tends to sit well above the path-gain range; use a band that
+    # keeps the colour ramp meaningful for RSS in dBm.
+    vmin, vmax = -110.0, -45.0
 
-    # --- Coverage heatmap ---
+    # --- Coverage heatmap (static PNG, kept for reference/thumbnails) ---
     fig, ax = plt.subplots(figsize=(8, 7))
     im = ax.imshow(
         best_rss, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax,
@@ -161,6 +163,10 @@ def _demo(region_cfg: dict) -> dict[str, Any]:
     ax.legend(loc="upper right", fontsize=8)
     fig.colorbar(im, ax=ax, label="RSS (dBm)")
     coverage_png = _fig_to_png(fig)
+
+    # --- Georeferenced overlay + legend for the zoomable Leaflet map ---
+    overlay_png = _overlay_raster_png(best_rss, vmin, vmax, alpha_floor=0.0)
+    legend_png = _legend_png(vmin, vmax, "RSS (dBm)")
 
     # --- Tiling preview (adaptive-ish grid + BS scatter) ---
     tiling_png = _tiling_preview(
@@ -188,8 +194,12 @@ def _demo(region_cfg: dict) -> dict[str, Any]:
 
     return {
         "coverage_png":     coverage_png,
+        "overlay_png":      overlay_png,
+        "legend_png":       legend_png,
         "tiling_png":       tiling_png,
         "cdf_png":          cdf_png,
+        "bounds_json":      json.dumps([south, west, north, east]),
+        "base_stations_json": json.dumps([[float(la), float(lo)] for la, lo in bs]),
         "kpis_json":        json.dumps(kpis),
         "compute_seconds":  time.time() - t0,
         "is_demo":          True,
@@ -232,6 +242,41 @@ def _tiling_preview(south, west, north, east, bs, min_cell_m, max_cell_m, title)
     ax.scatter(bs[:, 1], bs[:, 0], c="red", s=18, marker="^",
                edgecolors="white", linewidths=0.4, label="Base stations")
     ax.legend(loc="upper right", fontsize=8)
+    return _fig_to_png(fig)
+
+
+def _overlay_raster_png(values: np.ndarray, vmin: float, vmax: float,
+                        cmap_name: str = "viridis",
+                        alpha_floor: float = 0.0) -> bytes:
+    """Render `values` as a bare, north-up RGBA PNG for a Leaflet image overlay.
+
+    No axes, ticks, or colour bar — just the coloured raster, sized 1 px per
+    grid cell. Cells below `vmin` fade toward transparent so the basemap shows
+    through where there is no coverage. Row 0 of the returned image is the
+    NORTH edge (Leaflet places the image's top row at the north bound).
+    """
+    vals = np.asarray(values, dtype=float)
+    norm = np.clip((vals - vmin) / max(vmax - vmin, 1e-9), 0.0, 1.0)
+    rgba = matplotlib.colormaps[cmap_name](norm)  # (H, W, 4), floats 0..1
+    # Alpha ramps with signal so weak/no coverage is see-through.
+    rgba[..., 3] = alpha_floor + (1.0 - alpha_floor) * norm
+    rgba = np.flipud(rgba)  # north-up for Leaflet imageOverlay
+
+    buf = io.BytesIO()
+    plt.imsave(buf, rgba, format="png")
+    return buf.getvalue()
+
+
+def _legend_png(vmin: float, vmax: float, label: str,
+                cmap_name: str = "viridis") -> bytes:
+    """Standalone horizontal colour-bar legend for the map overlay."""
+    fig, ax = plt.subplots(figsize=(4.2, 0.7))
+    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+    cb = matplotlib.colorbar.ColorbarBase(
+        ax, cmap=matplotlib.colormaps[cmap_name], norm=norm, orientation="horizontal",
+    )
+    cb.set_label(label, fontsize=9)
+    ax.tick_params(labelsize=8)
     return _fig_to_png(fig)
 
 
@@ -311,6 +356,9 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
     fig.colorbar(im, ax=ax, label="Path gain (dB)")
     coverage_png = _fig_to_png(fig)
 
+    overlay_png = _overlay_raster_png(mosaic, vmin, vmax, alpha_floor=0.0)
+    legend_png = _legend_png(vmin, vmax, "Path gain (dB)")
+
     tiling_png = _tiling_preview(
         south, west, north, east,
         bs if bs is not None else np.empty((0, 2)),
@@ -328,10 +376,16 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
         "path_gain_percentiles_db": pct,
         "frequency_ghz":       round(float(region_cfg["frequency_hz"]) / 1e9, 3),
     }
+    bs_list = ([[float(la), float(lo)] for la, lo in bs]
+               if bs is not None else [])
     return {
         "coverage_png":    coverage_png,
+        "overlay_png":     overlay_png,
+        "legend_png":      legend_png,
         "tiling_png":      tiling_png,
         "cdf_png":         cdf_png,
+        "bounds_json":     json.dumps([south, west, north, east]),
+        "base_stations_json": json.dumps(bs_list),
         "kpis_json":       json.dumps(kpis),
         "compute_seconds": time.time() - t0,
         "is_demo":         False,
