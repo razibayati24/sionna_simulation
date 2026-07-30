@@ -303,15 +303,16 @@ def _cdf_png(values: np.ndarray, label: str, xlim: tuple[float, float]) -> tuple
 # Real path — drives the NVlabs sionna_lrm CLI on a GPU cluster
 # ---------------------------------------------------------------------------
 
-# Packages the NVlabs scripts need. Kept OUT of the notebook kernel: the geo
-# stack (shapely/rasterio via GDAL) and sionna-rt drag in a numpy build that is
-# ABI-incompatible with the Databricks runtime's precompiled numpy/pyarrow, which
-# crashes the notebook REPL ("numpy.dtype size changed" / "PyArrow not found").
-# We install them into an ISOLATED prefix dir and run the scripts against it.
-_SUBPROC_PACKAGES = [
-    "drjit", "mitsuba", "sionna-rt",
-    "geopandas", "shapely", "rasterio", "pyproj", "requests",
-]
+# The NVlabs repo declares its full dependency set in pyproject.toml (sionna-rt,
+# geopandas, shapely, osmnx, tqdm, scipy, basemap, open3d, triangle, …). We
+# install the repo itself into an ISOLATED prefix so pip resolves that exact
+# set — rather than hand-maintaining a partial list — and run the scripts
+# against it. Kept OUT of the notebook kernel: this stack drags in a numpy build
+# ABI-incompatible with the runtime's precompiled numpy/pyarrow, which crashes
+# the kernel REPL. numpy is pinned <2 because the prefix's pandas transitively
+# imports the runtime's pyarrow (compiled against numpy 1.x); numpy 2.x there
+# raises "module compiled using NumPy 1.x cannot be run in NumPy 2.x".
+_SUBPROC_PIN = ["numpy<2"]
 
 
 def _run_checked(cmd: list[str], env: dict | None = None) -> None:
@@ -344,9 +345,11 @@ def _ensure_subproc_env(repo_dir: str) -> tuple[str, str]:
         return sys.executable, pythonpath
 
     os.makedirs(prefix, exist_ok=True)
-    print(f"Installing NVlabs deps into isolated prefix {prefix} …", flush=True)
+    print(f"Installing NVlabs repo + deps into isolated prefix {prefix} …", flush=True)
+    # Install the repo (pulls its full pyproject.toml dependency set) plus the
+    # numpy pin, all into the prefix. --target keeps it out of the kernel.
     _run_checked([sys.executable, "-m", "pip", "install",
-                  "--target", prefix, *_SUBPROC_PACKAGES])
+                  "--target", prefix, *_SUBPROC_PIN, repo_dir])
     open(marker, "w").write("ok")
     return sys.executable, pythonpath
 
