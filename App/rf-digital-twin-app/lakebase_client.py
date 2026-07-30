@@ -185,6 +185,21 @@ CREATE TABLE IF NOT EXISTS compute_jobs (
     submitted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Large-scale radio maps (NVlabs sionna_lrm pipeline over a geographic bbox).
+-- Keyed by a hash of the region config so identical regions reuse the render.
+CREATE TABLE IF NOT EXISTS large_scale_maps (
+    region_hash     TEXT PRIMARY KEY,
+    region_name     TEXT,
+    region_json     JSONB,
+    coverage_png    BYTEA,
+    tiling_png      BYTEA,
+    cdf_png         BYTEA,
+    kpis_json       JSONB,
+    compute_seconds DOUBLE PRECISION,
+    is_demo         BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -374,6 +389,75 @@ def list_presets() -> list[dict]:
                 )
                 s["cells"] = cur.fetchall()
     return scenes
+
+
+# ---------------------------------------------------------------------------
+# Large-scale radio maps
+# ---------------------------------------------------------------------------
+
+_HASH_REGION_FIELDS = (
+    "south", "west", "north", "east",
+    "frequency_hz", "tx_power_dbm", "num_base_stations",
+    "min_cell_size_m", "max_cell_size_m", "samples", "demo_grid",
+)
+
+
+def compute_region_hash(region: dict) -> str:
+    """Deterministic hash over the large-scale region config."""
+    payload = {k: region[k] for k in _HASH_REGION_FIELDS if k in region}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def get_large_scale_map(region_hash: str) -> dict | None:
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM large_scale_maps WHERE region_hash = %s",
+                (region_hash,),
+            )
+            return cur.fetchone()
+
+
+def write_large_scale_map(region_hash: str, region: dict, results: dict) -> None:
+    """Persist a large-scale render (PNGs + KPIs) keyed by region_hash."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO large_scale_maps (
+                    region_hash, region_name, region_json,
+                    coverage_png, tiling_png, cdf_png,
+                    kpis_json, compute_seconds, is_demo
+                ) VALUES (
+                    %(region_hash)s, %(region_name)s, %(region_json)s,
+                    %(coverage_png)s, %(tiling_png)s, %(cdf_png)s,
+                    %(kpis_json)s, %(compute_seconds)s, %(is_demo)s
+                )
+                ON CONFLICT (region_hash) DO UPDATE SET
+                    region_name     = EXCLUDED.region_name,
+                    region_json     = EXCLUDED.region_json,
+                    coverage_png    = EXCLUDED.coverage_png,
+                    tiling_png      = EXCLUDED.tiling_png,
+                    cdf_png         = EXCLUDED.cdf_png,
+                    kpis_json       = EXCLUDED.kpis_json,
+                    compute_seconds = EXCLUDED.compute_seconds,
+                    is_demo         = EXCLUDED.is_demo,
+                    created_at      = now()
+                """,
+                {
+                    "region_hash":     region_hash,
+                    "region_name":     region.get("name"),
+                    "region_json":     json.dumps(region),
+                    "coverage_png":    results.get("coverage_png"),
+                    "tiling_png":      results.get("tiling_png"),
+                    "cdf_png":         results.get("cdf_png"),
+                    "kpis_json":       results.get("kpis_json"),
+                    "compute_seconds": results.get("compute_seconds"),
+                    "is_demo":         bool(results.get("is_demo", False)),
+                },
+            )
+        conn.commit()
 
 
 def load_scene_by_hash(config_hash: str) -> dict | None:

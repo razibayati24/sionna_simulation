@@ -1,3 +1,7 @@
 shiny==1.0.0
 databricks-sdk>=0.55.0
 psycopg[binary]>=3.1.18
+# Used by the large-scale-map demo path, which runs inline in the app process
+# when LARGE_SCALE_JOB_ID is not set (no GPU cluster required).
+numpy>=1.24
+matplotlib>=3.7

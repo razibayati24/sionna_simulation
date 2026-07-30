@@ -19,6 +19,7 @@ from shiny import App, ui, render, reactive
 
 import lakebase_client as lb
 from defaults import CONFIG_1, preset_cells
+from large_scale_defaults import REGION_PRESETS, DEFAULT_REGION, RegionConfig
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,12 @@ DATABRICKS_WORKSPACE_URL = os.environ.get(
 
 # Estimated wall-clock for a cold job cluster run (used for the wait ETA).
 JOB_ETA_SECONDS = 6 * 60
+
+# Databricks Job that runs the large-scale (sionna_lrm) pipeline on a GPU
+# cluster. Optional — when unset, the tab renders the GPU-free demo instead.
+LARGE_SCALE_JOB_ID = os.environ.get("LARGE_SCALE_JOB_ID")
+# A large-region ray-trace across many tiles takes far longer than one scene.
+LARGE_SCALE_JOB_ETA_SECONDS = 25 * 60
 
 PATTERN_CHOICES = ["tr38901", "iso", "dipole", "hw_dipole"]
 POLARIZATION_CHOICES = ["V", "H", "VH", "cross"]
@@ -124,6 +131,44 @@ def _cancel_databricks_run(run_id: int) -> None:
     w.jobs.cancel_run(run_id=int(run_id))
 
 
+def _collect_region(input) -> dict:
+    """Build a region config dict from the large-scale sidebar controls.
+
+    Non-editable fields (tiling cell sizes, ray samples) are inherited from the
+    selected preset so the region hash stays stable and matches any seeded row.
+    """
+    preset = REGION_PRESETS.get(input.ls_region(), DEFAULT_REGION)
+    region = preset.to_dict()
+    region.update({
+        "name":              preset.name,
+        "south":             float(input.ls_south()),
+        "west":              float(input.ls_west()),
+        "north":             float(input.ls_north()),
+        "east":              float(input.ls_east()),
+        "frequency_hz":      float(input.ls_frequency_ghz()) * 1e9,
+        "tx_power_dbm":      float(input.ls_tx_power_dbm()),
+        "num_base_stations": int(input.ls_num_bs()),
+    })
+    return region
+
+
+def _submit_large_scale_job(region_hash: str, region: dict) -> int:
+    """Trigger the large-scale (sionna_lrm) compute job. Returns run_id."""
+    if not LARGE_SCALE_JOB_ID:
+        raise RuntimeError("LARGE_SCALE_JOB_ID env var is not set.")
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient()
+    run = w.jobs.run_now(
+        job_id=int(LARGE_SCALE_JOB_ID),
+        notebook_params={
+            "region_hash": region_hash,
+            "region_json": json.dumps(region),
+        },
+    )
+    return int(run.run_id)
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -195,6 +240,41 @@ def _sidebar() -> ui.Tag:
             "Cached presets always load instantly.",
             style="font-size: 11px; color: #888; margin-top: 4px;",
         ),
+        ui.hr(),
+        ui.h5("Large-scale map"),
+        ui.tags.div(
+            "Coverage across a real geographic region (OSM buildings + "
+            "base stations) via NVIDIA sionna-large-radio-maps. Configure "
+            "here, then open the “Large-scale map” tab.",
+            style="font-size: 11px; color: #888; margin-bottom: 6px;",
+        ),
+        ui.input_select(
+            "ls_region", "Region preset",
+            choices={k: v.name for k, v in REGION_PRESETS.items()},
+            selected="seattle",
+        ),
+        ui.row(
+            ui.column(6, ui.input_numeric("ls_south", "South lat",
+                                          value=DEFAULT_REGION.south, step=0.001)),
+            ui.column(6, ui.input_numeric("ls_north", "North lat",
+                                          value=DEFAULT_REGION.north, step=0.001)),
+        ),
+        ui.row(
+            ui.column(6, ui.input_numeric("ls_west", "West lon",
+                                          value=DEFAULT_REGION.west, step=0.001)),
+            ui.column(6, ui.input_numeric("ls_east", "East lon",
+                                          value=DEFAULT_REGION.east, step=0.001)),
+        ),
+        ui.input_numeric("ls_frequency_ghz", "Frequency (GHz)",
+                         value=DEFAULT_REGION.frequency_hz / 1e9, min=0.1, max=100, step=0.1),
+        ui.input_numeric("ls_tx_power_dbm", "TX power / cell (dBm)",
+                         value=DEFAULT_REGION.tx_power_dbm, min=20.0, max=60.0, step=1.0),
+        ui.input_numeric("ls_num_bs", "Base stations (demo)",
+                         value=DEFAULT_REGION.num_base_stations, min=1, max=500),
+        ui.input_action_button(
+            "ls_compute_btn", "Compute large-scale map", class_="btn-primary",
+            style="width: 100%; margin-top: 4px;",
+        ),
         width=340,
     )
 
@@ -207,6 +287,7 @@ app_ui = ui.page_sidebar(
         ui.nav_panel("Users → TX",       ui.output_ui("association_view")),
         ui.nav_panel("CDFs",             ui.output_ui("cdf_view")),
         ui.nav_panel("KPIs",             ui.output_ui("kpis_view")),
+        ui.nav_panel("Large-scale map",  ui.output_ui("large_scale_view")),
         ui.nav_panel("Status",           ui.output_ui("status_view")),
         id="main_tabs",
     ),
@@ -233,6 +314,20 @@ def server(input, output, session):
         # User-visible.
         "status":           "Ready. Edit the config in the sidebar, then click Render.",
         "error":            None,
+    })
+
+    # Independent state for the large-scale (sionna_lrm) tab.
+    ls_state = reactive.Value({
+        "region_hash":  None,
+        "region":       None,
+        "data":         None,     # large_scale_maps row to display
+        "kpis":         None,
+        "pending_hash": None,     # region_hash of an in-flight GPU job
+        "pending_run_id": None,
+        "pending_started": None,
+        "status": ("Configure a region in the sidebar, then click "
+                   "“Compute large-scale map”."),
+        "error": None,
     })
 
     async def _try_load_cached(config_hash: str) -> dict | None:
@@ -465,6 +560,166 @@ def server(input, output, session):
         )
 
     # ------------------------------------------------------------------
+    # Large-scale map — region presets, compute, background poll.
+    # ------------------------------------------------------------------
+    @reactive.effect
+    @reactive.event(input.ls_region)
+    def _sync_region_preset():
+        """When the region preset changes, load its bbox/radio defaults into
+        the editable numeric inputs."""
+        preset = REGION_PRESETS.get(input.ls_region())
+        if not preset:
+            return
+        ui.update_numeric("ls_south", value=preset.south)
+        ui.update_numeric("ls_north", value=preset.north)
+        ui.update_numeric("ls_west",  value=preset.west)
+        ui.update_numeric("ls_east",  value=preset.east)
+        ui.update_numeric("ls_frequency_ghz", value=preset.frequency_hz / 1e9)
+        ui.update_numeric("ls_tx_power_dbm",   value=preset.tx_power_dbm)
+        ui.update_numeric("ls_num_bs",         value=preset.num_base_stations)
+
+    def _apply_ls_cached(state, region_hash, region, cached, status_msg):
+        kpis = cached.get("kpis_json")
+        if isinstance(kpis, (bytes, str)):
+            kpis = json.loads(kpis)
+        ls_state.set({
+            **state,
+            "region_hash":     region_hash,
+            "region":          region,
+            "data":            cached,
+            "kpis":            kpis,
+            "pending_hash":    None if state.get("pending_hash") == region_hash else state.get("pending_hash"),
+            "pending_run_id":  None if state.get("pending_hash") == region_hash else state.get("pending_run_id"),
+            "pending_started": None if state.get("pending_hash") == region_hash else state.get("pending_started"),
+            "status":          status_msg,
+            "error":           None,
+        })
+
+    @reactive.effect
+    @reactive.event(input.ls_compute_btn)
+    async def _on_large_scale_compute():
+        try:
+            region = _collect_region(input)
+            region_hash = lb.compute_region_hash(region)
+
+            # 1) Cache hit — instant load.
+            cached = None
+            try:
+                cached = await asyncio.to_thread(lb.get_large_scale_map, region_hash)
+            except Exception as e:  # noqa: BLE001 — cache lookup may fail (e.g., Lakebase unavailable)
+                print(f"Cache lookup failed (proceeding to demo/job path): {e}")
+
+            if cached:
+                tag = "demo" if cached.get("is_demo") else "Sionna RT"
+                _apply_ls_cached(
+                    ls_state(), region_hash, region, cached,
+                    f"Loaded cached large-scale map ({tag}, {region_hash[:12]}) "
+                    f"computed in {cached.get('compute_seconds', 0):.1f}s.",
+                )
+                ui.update_navs("main_tabs", selected="Large-scale map")
+                return
+
+            # 2) Cache miss with a real GPU job configured — submit it.
+            if LARGE_SCALE_JOB_ID:
+                prev = ls_state().get("pending_run_id")
+                if prev:
+                    try:
+                        await asyncio.to_thread(_cancel_databricks_run, prev)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"Failed to cancel previous LS run {prev}: {e}")
+                run_id = await asyncio.to_thread(
+                    _submit_large_scale_job, region_hash, region,
+                )
+                ls_state.set({
+                    **ls_state(),
+                    "region_hash":     region_hash,
+                    "region":          region,
+                    "pending_hash":    region_hash,
+                    "pending_run_id":  run_id,
+                    "pending_started": time.time(),
+                    "status": (
+                        f"Large-scale Sionna job submitted (run_id={run_id}). "
+                        f"Tiling → OSM scenes → per-tile ray tracing on a GPU "
+                        f"cluster; results auto-appear here when ready."
+                    ),
+                    "error": None,
+                })
+                ui.update_navs("main_tabs", selected="Large-scale map")
+                return
+
+            # 3) No GPU job configured — run the GPU-free demo inline and cache it.
+            ls_state.set({
+                **ls_state(),
+                "region_hash": region_hash,
+                "region": region,
+                "status": "No GPU job configured — computing demo coverage map…",
+                "error": None,
+            })
+            ui.update_navs("main_tabs", selected="Large-scale map")
+
+            from large_scale_compute import run_large_scale
+            results = await asyncio.to_thread(run_large_scale, region, True)
+            try:
+                await asyncio.to_thread(
+                    lb.write_large_scale_map, region_hash, region, results,
+                )
+            except Exception as e:  # noqa: BLE001 — demo still displays without cache
+                print(f"Could not cache large-scale demo: {e}")
+
+            kpis = json.loads(results["kpis_json"]) if results.get("kpis_json") else None
+            ls_state.set({
+                **ls_state(),
+                "data": results,
+                "kpis": kpis,
+                "status": (
+                    f"Demo large-scale map computed in "
+                    f"{results.get('compute_seconds', 0):.1f}s (synthetic — set "
+                    f"LARGE_SCALE_JOB_ID for real Sionna RT ray tracing)."
+                ),
+                "error": None,
+            })
+        except Exception as e:  # noqa: BLE001
+            ls_state.set({
+                **ls_state(),
+                "error": str(e),
+                "status": "Large-scale compute failed.",
+            })
+            traceback.print_exc()
+
+    @reactive.effect
+    async def _ls_background_poll():
+        reactive.invalidate_later(15)
+        st = ls_state()
+        pending_hash = st.get("pending_hash")
+        if not pending_hash:
+            return
+        try:
+            cached = await asyncio.to_thread(lb.get_large_scale_map, pending_hash)
+        except Exception as e:  # noqa: BLE001
+            print(f"LS background poll failed: {e}")
+            return
+        if cached:
+            elapsed = time.time() - (st.get("pending_started") or time.time())
+            _apply_ls_cached(
+                st, pending_hash, st.get("region"), cached,
+                f"Large-scale job complete (run_id={st.get('pending_run_id')}) — "
+                f"cached in {cached.get('compute_seconds', 0):.1f}s "
+                f"(end-to-end {elapsed:.0f}s).",
+            )
+            return
+        elapsed = int(time.time() - (st.get("pending_started") or time.time()))
+        remaining = max(LARGE_SCALE_JOB_ETA_SECONDS - elapsed, 30)
+        ls_state.set({
+            **st,
+            "status": (
+                f"Large-scale Sionna job running "
+                f"(run_id={st.get('pending_run_id')}). "
+                f"Elapsed {elapsed//60}m{elapsed%60:02d}s, "
+                f"~{remaining//60}m{remaining%60:02d}s remaining."
+            ),
+        })
+
+    # ------------------------------------------------------------------
     # Views
     # ------------------------------------------------------------------
     @render.ui
@@ -533,6 +788,77 @@ def server(input, output, session):
                 class_="table table-striped",
                 style="max-width: 480px;",
             ),
+        )
+
+    @render.ui
+    def large_scale_view():
+        st = ls_state() or {}
+        data = st.get("data") or {}
+        kpis = st.get("kpis") or {}
+        status_text = st.get("status") or ""
+        error_text = st.get("error")
+        is_demo = bool(data.get("is_demo"))
+
+        banner = None
+        if data and is_demo:
+            banner = ui.tags.div(
+                ui.tags.strong("Demo mode — "),
+                "synthetic coverage (log-distance path loss), not Sionna RT ray "
+                "tracing. Set LARGE_SCALE_JOB_ID to run the real "
+                "sionna-large-radio-maps pipeline on a GPU cluster.",
+                style="background:#fff3cd; border:1px solid #ffe69c; color:#664d03; "
+                      "padding:8px 10px; border-radius:4px; margin-bottom:10px; "
+                      "font-size:13px;",
+            )
+
+        kpi_rows = []
+        for label, key, fmt in [
+            ("Region",            "region",       str),
+            ("Area (km²)",        "area_km2",     str),
+            ("Base stations",     "num_base_stations", str),
+            ("Coverage (%)",      "coverage_pct", str),
+            ("Frequency (GHz)",   "frequency_ghz", str),
+            ("TX power (dBm)",    "tx_power_dbm", str),
+        ]:
+            if key in kpis:
+                kpi_rows.append(ui.tags.tr(ui.tags.td(label),
+                                           ui.tags.td(fmt(kpis[key]))))
+        pct = kpis.get("rss_percentiles_dbm") or kpis.get("path_gain_percentiles_db") or {}
+        unit = "dBm" if "rss_percentiles_dbm" in kpis else "dB"
+        for p in ("p10", "p50", "p90"):
+            if p in pct:
+                kpi_rows.append(ui.tags.tr(
+                    ui.tags.td(f"{p} ({unit})"), ui.tags.td(str(pct[p]))))
+
+        kpi_table = (
+            ui.tags.table(ui.tags.tbody(*kpi_rows),
+                          class_="table table-striped",
+                          style="max-width:420px; margin-top:12px;")
+            if kpi_rows else ""
+        )
+
+        return ui.div(
+            ui.h4("Large-scale radio map — NVIDIA sionna-large-radio-maps"),
+            ui.tags.p(status_text, style="color:#555; font-size:13px;"),
+            banner or "",
+            ui.tags.div(
+                ui.tags.strong("Error: "), str(error_text),
+                style="color:#c00; padding:8px; border:1px solid #c00; "
+                      "border-radius:4px; margin:8px 0;",
+            ) if error_text else "",
+            ui.row(
+                ui.column(7,
+                    ui.h5("Coverage"),
+                    _png_img(data.get("coverage_png"), "large-scale coverage map"),
+                ),
+                ui.column(5,
+                    ui.h5("Adaptive tiling"),
+                    _png_img(data.get("tiling_png"), "tiling preview"),
+                ),
+            ),
+            ui.h5("Coverage CDF", style="margin-top:16px;"),
+            _png_img(data.get("cdf_png"), "coverage CDF"),
+            kpi_table,
         )
 
     @render.ui

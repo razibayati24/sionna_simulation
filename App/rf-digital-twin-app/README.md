@@ -34,13 +34,45 @@ App/rf-digital-twin-app/
 ├── app.yaml                              Databricks Apps deploy config
 ├── requirements.txt                      App runtime deps (no Sionna; that's job-side)
 ├── defaults.py                           19-preset gallery + 7-cell layout
+├── large_scale_defaults.py               Region presets for the large-scale tab
+├── large_scale_compute.py                NVlabs sionna_lrm pipeline + GPU-free demo
 ├── lakebase_client.py                    Postgres connection + Delta-equivalent helpers
 ├── sionna_compute.py                     Sionna RT pipeline (shared by setup + job)
 ├── setup/
-│   └── setup_rf_digital_twin.py          One-shot workspace setup notebook
+│   ├── setup_rf_digital_twin.py          One-shot workspace setup notebook
+│   └── setup_large_scale_maps.py         Init large_scale_maps table + seed demo regions
 └── jobs/
-    └── sionna_compute_job.py             Notebook the app triggers on cache miss
+    ├── sionna_compute_job.py             Notebook the app triggers on cache miss
+    └── large_scale_compute_job.py        Large-scale (sionna_lrm) GPU job (optional)
 ```
+
+## Large-scale radio maps (NVIDIA sionna-large-radio-maps)
+
+The **Large-scale map** tab computes coverage across a *real geographic region*
+— a WGS84 lat/lon bounding box with OpenStreetMap buildings and a base-station
+layout — by wrapping NVIDIA's
+[`sionna-large-radio-maps`](https://github.com/NVlabs/sionna-large-radio-maps)
+pipeline (adaptive tiling → OSM scene build → per-tile ray tracing → mosaic).
+This complements the single synthetic `etoile` scene the other tabs use.
+
+Configure a region in the sidebar's **Large-scale map** section (preset +
+editable bbox / frequency / TX power), then click **Compute large-scale map**.
+Two execution paths, chosen automatically:
+
+- **Demo (GPU-free, default).** When `LARGE_SCALE_JOB_ID` is not set, the app
+  computes a synthetic log-distance coverage map inline (no cluster needed) and
+  flags it with a yellow "Demo mode" banner. Great for a quick walkthrough.
+- **Real Sionna RT.** Set `LARGE_SCALE_JOB_ID` in `app.yaml` to a job created
+  from `jobs/large_scale_compute_job.py` (GPU cluster, RTX cores preferred).
+  On a cache miss the app submits that job; it clones the NVlabs repo, runs the
+  full pipeline, mosaics the per-tile path-gain arrays, and writes the result to
+  the Lakebase `large_scale_maps` cache. A background poller auto-loads it when
+  ready.
+
+Region presets ship for **Seattle** (default), **San Francisco**, and **Paris
+(étoile)**. Run `setup/setup_large_scale_maps.py` (CPU-only) once to create the
+`large_scale_maps` table and seed a demo render for each preset so the tab loads
+instantly.
 
 ## Deploy in 10 minutes — quickstart
 
