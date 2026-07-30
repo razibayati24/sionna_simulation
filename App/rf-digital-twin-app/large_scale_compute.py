@@ -375,8 +375,12 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
     env["PYTHONPATH"] = os.pathsep.join(
         [pythonpath] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
     )
+    # sionna_lrm/__init__.py hard-requires remote/scenes to exist at import
+    # time (and references these other dirs), so create the full skeleton.
     outputs_dir = os.path.join(data_dir, "remote", "outputs")
-    os.makedirs(outputs_dir, exist_ok=True)
+    for sub in ("remote/scenes", "remote/outputs", "remote/transmitters",
+                "local/scenes", "local/optix_cache"):
+        os.makedirs(os.path.join(data_dir, sub), exist_ok=True)
 
     def _run(cmd: list[str]) -> None:
         print("+ " + " ".join(cmd), flush=True)
