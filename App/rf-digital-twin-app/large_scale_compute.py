@@ -307,31 +307,17 @@ def _cdf_png(values: np.ndarray, label: str, xlim: tuple[float, float]) -> tuple
 # stack (shapely/rasterio via GDAL) and sionna-rt drag in a numpy build that is
 # ABI-incompatible with the Databricks runtime's precompiled numpy/pyarrow, which
 # crashes the notebook REPL ("numpy.dtype size changed" / "PyArrow not found").
-# We install them in an ISOLATED venv and run the scripts there instead.
+# We install them into an ISOLATED prefix dir and run the scripts against it.
 _SUBPROC_PACKAGES = [
     "drjit", "mitsuba", "sionna-rt",
     "geopandas", "shapely", "rasterio", "pyproj", "requests",
 ]
 
 
-def _base_python() -> str:
-    """Return a Python capable of bootstrapping a venv.
-
-    NOT sys.executable — inside a Databricks notebook that points at the
-    ephemeral notebook-scoped env (…/pythonEnv-<uuid>/bin/python), which lacks
-    the ensurepip seed and fails `-m venv`. The base cluster interpreter under
-    /databricks/python3 (or /databricks/python) has it.
-    """
-    for cand in ("/databricks/python3/bin/python", "/databricks/python/bin/python"):
-        if os.path.exists(cand):
-            return cand
-    return sys.executable  # local dev / non-Databricks fallback
-
-
-def _run_checked(cmd: list[str]) -> None:
+def _run_checked(cmd: list[str], env: dict | None = None) -> None:
     """Run `cmd`, capturing output; on failure raise with stdout+stderr attached."""
     print("+ " + " ".join(cmd), flush=True)
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if r.returncode != 0:
         raise RuntimeError(
             f"Command failed (exit {r.returncode}): {' '.join(cmd)}\n"
@@ -340,32 +326,29 @@ def _run_checked(cmd: list[str]) -> None:
         )
 
 
-def _ensure_subproc_python(repo_dir: str) -> str:
-    """Create (once) an isolated venv with the NVlabs deps and return its python.
+def _ensure_subproc_env(repo_dir: str) -> tuple[str, str]:
+    """Install the NVlabs deps into an isolated prefix; return (python, PYTHONPATH).
 
-    Built from the BASE cluster python (see `_base_python`) with
-    --system-site-packages so CUDA / GPU driver libs on the host remain visible,
-    but the geo/sionna wheels install into the venv and never touch the notebook
-    kernel's site-packages. Cached under the repo dir so a warm cluster reuses it
-    across runs.
+    Deliberately avoids `venv`: the Databricks runtime ships without ensurepip
+    (no python3.x-venv apt package), so `python -m venv` can't seed pip. Instead
+    we `pip install --target <prefix>` into a plain directory and run the scripts
+    with that prefix (plus the repo, so `sionna_lrm` imports) prepended to
+    PYTHONPATH. The scripts run under sys.executable but with the isolated numpy/
+    geo stack shadowing the runtime's — safe because it's a subprocess that never
+    imports into the notebook kernel. Cached under the repo dir for warm reuse.
     """
-    venv_dir = os.path.join(repo_dir, ".slrm_venv")
-    py = os.path.join(venv_dir, "bin", "python")
-    marker = os.path.join(venv_dir, ".deps_ok")
-    if os.path.exists(marker) and os.path.exists(py):
-        return py
+    prefix = os.path.join(repo_dir, ".slrm_deps")
+    marker = os.path.join(prefix, ".deps_ok")
+    pythonpath = os.pathsep.join([prefix, repo_dir])
+    if os.path.exists(marker):
+        return sys.executable, pythonpath
 
-    if not os.path.exists(py):
-        print(f"Creating isolated venv at {venv_dir} …", flush=True)
-        _run_checked([_base_python(), "-m", "venv", "--system-site-packages", venv_dir])
-    _run_checked([py, "-m", "pip", "install", "--upgrade", "pip"])
-    # Install the repo itself (so `sionna_lrm` imports) plus its heavy deps.
-    _run_checked([py, "-m", "pip", "install", *_SUBPROC_PACKAGES])
-    if os.path.exists(os.path.join(repo_dir, "pyproject.toml")) or \
-       os.path.exists(os.path.join(repo_dir, "setup.py")):
-        _run_checked([py, "-m", "pip", "install", "-e", repo_dir])
+    os.makedirs(prefix, exist_ok=True)
+    print(f"Installing NVlabs deps into isolated prefix {prefix} …", flush=True)
+    _run_checked([sys.executable, "-m", "pip", "install",
+                  "--target", prefix, *_SUBPROC_PACKAGES])
     open(marker, "w").write("ok")
-    return py
+    return sys.executable, pythonpath
 
 
 def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
@@ -382,10 +365,16 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
     south, west, north, east = _bbox(region_cfg)
     scripts = os.path.join(repo_dir, "scripts")
 
-    subproc_py = _ensure_subproc_python(repo_dir)
+    subproc_py, pythonpath = _ensure_subproc_env(repo_dir)
 
     data_dir = tempfile.mkdtemp(prefix="slrm_")
     env = {**os.environ, "SLRM_DATA_DIR": data_dir}
+    # Prepend the isolated deps prefix + repo so the scripts see the isolated
+    # numpy/geo/sionna stack (and can import sionna_lrm) without touching the
+    # notebook kernel.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [pythonpath] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+    )
     outputs_dir = os.path.join(data_dir, "remote", "outputs")
     os.makedirs(outputs_dir, exist_ok=True)
 
