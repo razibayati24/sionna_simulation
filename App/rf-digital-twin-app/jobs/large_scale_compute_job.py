@@ -18,10 +18,19 @@
 # MAGIC
 # MAGIC Must run on a **GPU cluster** (RTX cores preferred, e.g. L40S) with
 # MAGIC internet access to OpenStreetMap/Overpass and Lakebase env vars set.
+# MAGIC
+# MAGIC **Dependency isolation:** the notebook kernel installs ONLY the light
+# MAGIC packages it imports directly (psycopg + databricks-sdk; numpy/matplotlib
+# MAGIC ship with the runtime). The heavy Sionna RT + geo stack
+# MAGIC (sionna-rt/mitsuba/drjit/geopandas/shapely/rasterio) is installed into an
+# MAGIC isolated venv at runtime by `large_scale_compute._ensure_subproc_python`
+# MAGIC and only ever runs in subprocesses. Installing that stack into the kernel
+# MAGIC instead crashes the REPL — it forces a numpy build that is ABI-incompatible
+# MAGIC with the runtime's precompiled numpy/pyarrow ("numpy.dtype size changed").
 
 # COMMAND ----------
 
-# MAGIC %pip install drjit mitsuba sionna-rt geopandas shapely rasterio psycopg[binary]
+# MAGIC %pip install "psycopg[binary]>=3.1.18" "databricks-sdk>=0.55.0"
 
 # COMMAND ----------
 

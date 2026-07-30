@@ -303,16 +303,62 @@ def _cdf_png(values: np.ndarray, label: str, xlim: tuple[float, float]) -> tuple
 # Real path — drives the NVlabs sionna_lrm CLI on a GPU cluster
 # ---------------------------------------------------------------------------
 
+# Packages the NVlabs scripts need. Kept OUT of the notebook kernel: the geo
+# stack (shapely/rasterio via GDAL) and sionna-rt drag in a numpy build that is
+# ABI-incompatible with the Databricks runtime's precompiled numpy/pyarrow, which
+# crashes the notebook REPL ("numpy.dtype size changed" / "PyArrow not found").
+# We install them in an ISOLATED venv and run the scripts there instead.
+_SUBPROC_PACKAGES = [
+    "drjit", "mitsuba", "sionna-rt",
+    "geopandas", "shapely", "rasterio", "pyproj", "requests",
+]
+
+
+def _ensure_subproc_python(repo_dir: str) -> str:
+    """Create (once) an isolated venv with the NVlabs deps and return its python.
+
+    Built with --system-site-packages so CUDA / GPU driver libs on the host
+    remain visible, but the geo/sionna wheels install into the venv and never
+    touch the notebook kernel's site-packages. Cached under the repo dir so a
+    warm cluster reuses it across runs.
+    """
+    venv_dir = os.path.join(repo_dir, ".slrm_venv")
+    py = os.path.join(venv_dir, "bin", "python")
+    marker = os.path.join(venv_dir, ".deps_ok")
+    if os.path.exists(marker) and os.path.exists(py):
+        return py
+
+    if not os.path.exists(py):
+        print(f"Creating isolated venv at {venv_dir} …", flush=True)
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--system-site-packages", venv_dir],
+            check=True,
+        )
+    subprocess.run([py, "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    # Install the repo itself (so `sionna_lrm` imports) plus its heavy deps.
+    subprocess.run([py, "-m", "pip", "install", *_SUBPROC_PACKAGES], check=True)
+    if os.path.exists(os.path.join(repo_dir, "pyproject.toml")) or \
+       os.path.exists(os.path.join(repo_dir, "setup.py")):
+        subprocess.run([py, "-m", "pip", "install", "-e", repo_dir], check=True)
+    open(marker, "w").write("ok")
+    return py
+
+
 def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
     """Run the documented NVlabs pipeline end-to-end for the bbox.
 
-    Requires `repo_dir` to be a checkout of NVlabs/sionna-large-radio-maps with
-    Sionna RT + Mitsuba + drjit installed, on a GPU node. Writes into a temp
-    data dir (SLRM_DATA_DIR) and mosaics the per-tile outputs.
+    Requires `repo_dir` to be a checkout of NVlabs/sionna-large-radio-maps on a
+    GPU node. The heavy deps (Sionna RT / Mitsuba / drjit / geo stack) run in an
+    isolated venv (see `_ensure_subproc_python`) so they never destabilise the
+    notebook kernel. Writes into a temp data dir (SLRM_DATA_DIR) and mosaics the
+    per-tile outputs. All Sionna/geo code executes in subprocesses — this module
+    itself only needs numpy + matplotlib (already in the runtime).
     """
     t0 = time.time()
     south, west, north, east = _bbox(region_cfg)
     scripts = os.path.join(repo_dir, "scripts")
+
+    subproc_py = _ensure_subproc_python(repo_dir)
 
     data_dir = tempfile.mkdtemp(prefix="slrm_")
     env = {**os.environ, "SLRM_DATA_DIR": data_dir}
@@ -327,19 +373,19 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
     tiling_npz = os.path.join(outputs_dir, "tiling.npz")
 
     # 1) Adaptive tiling for the bbox.
-    _run([sys.executable, "generate_tiling.py",
+    _run([subproc_py, "generate_tiling.py",
           "--bbox", str(south), str(west), str(north), str(east),
           tiling_npz])
 
     # 2) Build Sionna RT scenes (pulls OSM buildings).
-    _run([sys.executable, "scene_builder.py", "file", tiling_npz,
+    _run([subproc_py, "scene_builder.py", "file", tiling_npz,
           "--subdir", area])
 
     # 3) Compute per-tile radio maps.
     scenes_dir = os.path.join(data_dir, "local", "scenes", area)
     rm_out = os.path.join(data_dir, "remote", "outputs", "radio_maps")
     os.makedirs(rm_out, exist_ok=True)
-    _run([sys.executable, "compute_radio_maps.py",
+    _run([subproc_py, "compute_radio_maps.py",
           "-s", scenes_dir, "-o", rm_out,
           "--n-samples", str(int(region_cfg.get("samples", 20_000_000)))])
 
