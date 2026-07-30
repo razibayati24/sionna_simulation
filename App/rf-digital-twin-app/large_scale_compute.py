@@ -314,13 +314,40 @@ _SUBPROC_PACKAGES = [
 ]
 
 
+def _base_python() -> str:
+    """Return a Python capable of bootstrapping a venv.
+
+    NOT sys.executable — inside a Databricks notebook that points at the
+    ephemeral notebook-scoped env (…/pythonEnv-<uuid>/bin/python), which lacks
+    the ensurepip seed and fails `-m venv`. The base cluster interpreter under
+    /databricks/python3 (or /databricks/python) has it.
+    """
+    for cand in ("/databricks/python3/bin/python", "/databricks/python/bin/python"):
+        if os.path.exists(cand):
+            return cand
+    return sys.executable  # local dev / non-Databricks fallback
+
+
+def _run_checked(cmd: list[str]) -> None:
+    """Run `cmd`, capturing output; on failure raise with stdout+stderr attached."""
+    print("+ " + " ".join(cmd), flush=True)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Command failed (exit {r.returncode}): {' '.join(cmd)}\n"
+            f"--- stdout ---\n{r.stdout[-4000:]}\n"
+            f"--- stderr ---\n{r.stderr[-4000:]}"
+        )
+
+
 def _ensure_subproc_python(repo_dir: str) -> str:
     """Create (once) an isolated venv with the NVlabs deps and return its python.
 
-    Built with --system-site-packages so CUDA / GPU driver libs on the host
-    remain visible, but the geo/sionna wheels install into the venv and never
-    touch the notebook kernel's site-packages. Cached under the repo dir so a
-    warm cluster reuses it across runs.
+    Built from the BASE cluster python (see `_base_python`) with
+    --system-site-packages so CUDA / GPU driver libs on the host remain visible,
+    but the geo/sionna wheels install into the venv and never touch the notebook
+    kernel's site-packages. Cached under the repo dir so a warm cluster reuses it
+    across runs.
     """
     venv_dir = os.path.join(repo_dir, ".slrm_venv")
     py = os.path.join(venv_dir, "bin", "python")
@@ -330,16 +357,13 @@ def _ensure_subproc_python(repo_dir: str) -> str:
 
     if not os.path.exists(py):
         print(f"Creating isolated venv at {venv_dir} …", flush=True)
-        subprocess.run(
-            [sys.executable, "-m", "venv", "--system-site-packages", venv_dir],
-            check=True,
-        )
-    subprocess.run([py, "-m", "pip", "install", "--upgrade", "pip"], check=True)
+        _run_checked([_base_python(), "-m", "venv", "--system-site-packages", venv_dir])
+    _run_checked([py, "-m", "pip", "install", "--upgrade", "pip"])
     # Install the repo itself (so `sionna_lrm` imports) plus its heavy deps.
-    subprocess.run([py, "-m", "pip", "install", *_SUBPROC_PACKAGES], check=True)
+    _run_checked([py, "-m", "pip", "install", *_SUBPROC_PACKAGES])
     if os.path.exists(os.path.join(repo_dir, "pyproject.toml")) or \
        os.path.exists(os.path.join(repo_dir, "setup.py")):
-        subprocess.run([py, "-m", "pip", "install", "-e", repo_dir], check=True)
+        _run_checked([py, "-m", "pip", "install", "-e", repo_dir])
     open(marker, "w").write("ok")
     return py
 
@@ -367,7 +391,14 @@ def _run_real(region_cfg: dict, repo_dir: str) -> dict[str, Any]:
 
     def _run(cmd: list[str]) -> None:
         print("+ " + " ".join(cmd), flush=True)
-        subprocess.run(cmd, cwd=scripts, env=env, check=True)
+        r = subprocess.run(cmd, cwd=scripts, env=env, capture_output=True, text=True)
+        if r.stdout:
+            print(r.stdout[-4000:], flush=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"NVlabs script failed (exit {r.returncode}): {' '.join(cmd)}\n"
+                f"--- stderr ---\n{r.stderr[-4000:]}"
+            )
 
     area = "region"
     tiling_npz = os.path.join(outputs_dir, "tiling.npz")
