@@ -16,7 +16,12 @@ env:
   # GPU job that renders an uncached config on demand. Set after creating the job from
   # jobs/render_job.py.
   - name: "SIONNA_RENDER_JOB_ID"
-    value: ""
+    value: "296253960306159"
+
+  # Postgres schema inside the Lakebase database. Keeps this app's cache separate from the
+  # other demos sharing the rf-digital-twin-pg instance.
+  - name: "PG_SCHEMA"
+    value: "lakebase_only"
 
   # SQL warehouse used to read the geospatial tower table (a geometry column blocks Spark,
   # and the app has no Spark anyway). Leave unset to auto-pick a running serverless warehouse.
