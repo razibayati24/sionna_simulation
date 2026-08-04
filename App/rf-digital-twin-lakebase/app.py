@@ -331,6 +331,14 @@ def server(input, output, session):
         """Cache hit → load and return. Miss → submit the GPU job and start polling."""
         try:
             story = _identify(_story_from_inputs(input))
+            # The first render for a neighborhood reads its towers from the SQL warehouse, which
+            # can take a few seconds (longer if the warehouse is cold) — say so rather than
+            # looking hung. Cached thereafter for the life of the process.
+            render_state.set({
+                **render_state(),
+                "status": f"Resolving {story.neighborhood} towers from Unity Catalog…",
+                "error": None,
+            })
             scene_cfg, cells, tile = await _resolve(story)
             config_hash = lb.compute_config_hash(scene_cfg, cells)
 
