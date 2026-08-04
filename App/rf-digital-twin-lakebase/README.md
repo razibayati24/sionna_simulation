@@ -92,7 +92,9 @@ App/rf-digital-twin-lakebase/
 > `mapbox_earcut`) belong to the **setup notebook and render job**, not the app — the app process
 > only reads Lakebase and the tower table, so its `requirements.txt` stays light.
 > `mapbox_earcut` is the triangulation backend `trimesh` needs to extrude building footprints;
-> without it every building silently drops to the flat-ground fallback.
+> without it every building silently drops to the flat-ground fallback. Install it via the
+> notebook's `%pip` cell only — as a *cluster* library it drags in numpy 2 and breaks DBR 16.4's
+> numpy 1 ABI, killing the run at `Failure starting repl` before any code executes.
 
 ## Deploy
 

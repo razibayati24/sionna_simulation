@@ -299,12 +299,22 @@ renders S1–S7 into the cache. It's idempotent — re-running only renders what
 ```
 single node · g5.xlarge driver · DBR 16.4.x-scala2.13 · SINGLE_USER
 libraries: drjit mitsuba sionna-rt psycopg[binary]>=3.1.18 databricks-sdk>=0.55.0
-           requests shapely trimesh mapbox_earcut
+           requests shapely trimesh
 spark_env_vars: SEATTLE_SQL_WAREHOUSE_ID=<warehouse id>   PG_SCHEMA=<your schema>
 ```
 
-`mapbox_earcut` is not optional — without it trimesh can't triangulate building footprints and the
-OSM buildings silently vanish from the scene. Internet egress is required (Overpass API).
+Internet egress is required (Overpass API).
+
+Two library gotchas, both learned the hard way:
+
+- **`mapbox_earcut` must be installed by the notebook's `%pip` cell, not as a cluster library.**
+  It's not optional — without it trimesh can't triangulate building footprints and the OSM
+  buildings silently vanish. But as a *cluster* library it resolves numpy 2, which breaks DBR
+  16.4's numpy 1 ABI before the notebook even starts: the run dies with
+  `Failure starting repl` and `numpy.dtype size changed, Expected 96 from C header, got 88`.
+  The `%pip` cell installs it after the kernel is up, where it's harmless.
+- Keep that `%pip` line in sync with this library list — the notebook re-installs the same set so
+  it also runs standalone on an interactive cluster.
 
 **3. Create the app** pointing at `App/rf-digital-twin-lakebase`, and set `SIONNA_RENDER_JOB_ID` in
 `app.yaml` to the job you just made.
