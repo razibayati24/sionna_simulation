@@ -1,7 +1,8 @@
 command: [
   "shiny",
   "run",
-  "--reload",
+  # Do NOT add --reload here: on Databricks Apps it kills the Shiny session
+  # websocket and every panel renders blank.
   "--host", "0.0.0.0",
   "--port", "8000",
   "app.py:app"

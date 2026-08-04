@@ -1,7 +1,7 @@
 # Chapter 0 — Sionna RF Agent (Seattle)
 
 A cinematic, self-running showcase that opens the Sionna RF story: **"the network
-that fixes itself."** It's the prequel to the [`rf-digital-twin-app`](../rf-digital-twin-app-lakehouse) —
+that fixes itself."** It's the prequel to the [`rf-digital-twin-app`](../rf-digital-twin-app/README.md) —
 where that app lets you drive the digital twin by hand, Chapter 0 shows *why* it matters.
 
 ## The narrative (auto-plays)

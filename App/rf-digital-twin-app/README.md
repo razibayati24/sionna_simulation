@@ -1,8 +1,8 @@
 # RF Digital Twin — Lakebase variant
 
-The default app. Caches every Sionna RT render in **Lakebase Postgres** and reads them back through a `psycopg` connection. Sub-30 ms cache hits, OLTP-grade throughput, instance is always warm.
+Caches every Sionna RT render in **Lakebase Postgres** and reads them back through a `psycopg` connection. Sub-30 ms cache hits, OLTP-grade throughput, instance is always warm.
 
-For the cache-layer tradeoffs vs the [Lakehouse variant](../rf-digital-twin-app-lakehouse/README.md), see the [top-level README's "Lakebase vs Lakehouse — performance at scale" section](../../README.md#lakebase-vs-lakehouse--performance-at-scale).
+This is the full deployment guide. For the app summary, preset gallery, and architecture diagram, see the [top-level README](../../README.md).
 
 ```
                 ┌─────────────────────────────────────────────┐
