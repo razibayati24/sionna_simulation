@@ -176,6 +176,27 @@ def _cancel_databricks_run(run_id: int) -> None:
     WorkspaceClient().jobs.cancel_run(run_id=int(run_id))
 
 
+def _run_result_state(run_id: int) -> Optional[str]:
+    """Terminal result state of a run (``SUCCESS`` / ``FAILED`` / ``CANCELED`` / …), else None.
+
+    None means "still going" — the run is queued, starting, or executing.
+    """
+    from databricks.sdk import WorkspaceClient
+
+    run = WorkspaceClient().jobs.get_run(run_id=int(run_id))
+    state = getattr(run, "state", None)
+    if state is None:
+        return None
+    life = getattr(state, "life_cycle_state", None)
+    life = getattr(life, "value", life)
+    if str(life) not in ("TERMINATED", "INTERNAL_ERROR", "SKIPPED"):
+        return None
+    result = getattr(state, "result_state", None)
+    result = getattr(result, "value", result)
+    # A terminal run with no result_state (e.g. INTERNAL_ERROR) still ended.
+    return str(result) if result else str(life)
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
@@ -482,8 +503,11 @@ def server(input, output, session):
             )
             return
 
-        # Still running — surface a job failure rather than polling forever.
+        # No render yet. Before reporting "still running", make sure it actually is — a job
+        # that died can otherwise leave this polling forever.
         run_id = st.get("pending_run_id")
+
+        # 1) The job wrote FAILED itself (the render raised).
         job = None
         try:
             job = await asyncio.to_thread(lb.get_job, pending_hash)
@@ -497,6 +521,28 @@ def server(input, output, session):
                 "error": job.get("error_message") or "The render job reported FAILED.",
             })
             return
+
+        # 2) The run ended without the notebook getting far enough to say so — cancelled, or
+        # killed during cluster start / library install. compute_jobs would sit at RUNNING
+        # forever, so ask the Jobs API what really happened.
+        if run_id:
+            try:
+                state = await asyncio.to_thread(_run_result_state, run_id)
+            except Exception as e:
+                print(f"Background poll: run lookup failed: {e}")
+                state = None
+            if state and state not in ("SUCCESS",):
+                render_state.set({
+                    **st,
+                    "pending_hash": None, "pending_run_id": None, "pending_started": None,
+                    "status": f"Render run {run_id} ended as {state} without producing a render.",
+                    "error": (
+                        f"The job run finished as {state} but no render was cached. Check the "
+                        f"run in the Jobs UI — a failure during cluster start or library "
+                        f"install never reaches the notebook, so nothing is reported here."
+                    ),
+                })
+                return
 
         elapsed = int(time.time() - (st.get("pending_started") or time.time()))
         remaining = max(JOB_ETA_SECONDS - elapsed, 30)
