@@ -1,3 +1,6 @@
 shiny==1.0.0
 databricks-sdk>=0.55.0
 psycopg[binary]>=3.1.18
+# towers.py projects lat/lon and derives per-tower config with numpy; the app imports it
+# (via scene_spec) to resolve the tower set it hashes.
+numpy>=1.26,<2
