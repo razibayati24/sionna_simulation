@@ -1,26 +1,30 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Seattle RF Digital Twin — Workspace Setup
+# MAGIC # RF Digital Twin — Workspace Setup
 # MAGIC
-# MAGIC One-shot setup for the **Seattle** RF Digital Twin app. Unlike the etoile demo (synthetic
-# MAGIC 7-cell ring on the Paris scene), this drives the simulation from **real T-Mobile towers**
-# MAGIC in `cmegdemos_catalog.network_analytics_enablement.cell_towers` (2,312 towers across the
+# MAGIC One-shot setup for the RF Digital Twin app: seeds the Lakebase cache so the app's presets
+# MAGIC load instantly. The simulation is driven from **real T-Mobile towers** in
+# MAGIC `cmegdemos_catalog.network_analytics_enablement.cell_towers` (2,312 towers across the
 # MAGIC Seattle metro) on **OpenStreetMap building geometry**.
 # MAGIC
 # MAGIC This notebook:
 # MAGIC 1. Installs Sionna RT + OSM scene deps.
-# MAGIC 2. Reuses the existing **`rf-digital-twin-pg`** Lakebase instance and initialises the
-# MAGIC    neighborhood-aware schema (adds `neighborhoods` table + neighborhood/tile columns).
+# MAGIC 2. Initialises the Lakebase schema on the **`rf-digital-twin-pg`** instance (set
+# MAGIC    `PG_SCHEMA` to match the app's — default `lakebase_only`).
 # MAGIC 3. Registers the metro neighborhoods (`neighborhoods.py`).
 # MAGIC 4. **Calibrates** one Downtown tile to size batch jobs to ~20–30 min.
-# MAGIC 5. Renders the **Downtown** curated story gallery + coverage tiles into Lakebase.
-# MAGIC 6. Prints the deployment checklist for the new `seattle-rf-digital-twin` app.
+# MAGIC 5. Renders the **Downtown** preset gallery (S1–S7) + coverage tiles into Lakebase.
+# MAGIC 6. Prints the deployment checklist.
+# MAGIC
+# MAGIC Afterwards, run `tools/check_hash_parity.py` to confirm the app will actually hit these
+# MAGIC rows — that's the check that keeps the "instant" demo path honest.
 # MAGIC
 # MAGIC ## Cluster
-# MAGIC Same GPU requirement as the etoile demo — Sionna RT needs NVIDIA OptiX. Validated:
-# MAGIC **DBR 16.4 LTS (non-ML), driver+worker `g5.xlarge` (A10G), single-user**. A CPU cluster
-# MAGIC fails with `libnvoptix.so.1 could not be loaded`. The cluster also needs **internet
-# MAGIC egress** for the OSM Overpass API (a flat-ground fallback covers tiles where it fails).
+# MAGIC Sionna RT needs NVIDIA OptiX. Validated: **DBR 16.4 LTS (non-ML), driver+worker
+# MAGIC `g5.xlarge` (A10G), single-user**. A CPU cluster fails with
+# MAGIC `libnvoptix.so.1 could not be loaded`. The cluster also needs **internet egress** for the
+# MAGIC OSM Overpass API (a flat-ground fallback covers tiles where it fails), and
+# MAGIC `SEATTLE_SQL_WAREHOUSE_ID` set so the geospatial tower table can be read.
 
 # COMMAND ----------
 
@@ -54,9 +58,14 @@ print("Authenticated as:", w.current_user.me().user_name)
 
 # COMMAND ----------
 
-# The app mints OAuth tokens for this instance at runtime (shared with the etoile demo).
+# The app mints OAuth tokens for this instance at runtime.
 os.environ.setdefault("LAKEBASE_INSTANCE", "rf-digital-twin-pg")
 os.environ.setdefault("PGDATABASE", "rf_digital_twin")
+# Must match the app's PG_SCHEMA, or the app will look for these renders in the wrong schema.
+os.environ.setdefault("PG_SCHEMA", "lakebase_only")
+# The tower table's geometry column can't be read by Spark on DBR 16.4, so towers.py goes
+# through a SQL warehouse. Leave unset to auto-pick a running serverless one.
+# os.environ.setdefault("SEATTLE_SQL_WAREHOUSE_ID", "<warehouse id>")
 
 CALIBRATION_TARGET_MIN = 25.0     # aim each coverage batch at ~25 min
 RENDER_COVERAGE = True            # also render Downtown's full coverage tiles (not just stories)
@@ -122,8 +131,8 @@ display(pd.DataFrame(story_summary))
 # MAGIC %md
 # MAGIC ## 6. Render Downtown coverage tiles (batched ~20–30 min each)
 # MAGIC
-# MAGIC Loops over every calibrated batch. For a one-off setup we render all batches inline; in
-# MAGIC production the app triggers `jobs/seattle_render_job.py` per batch on demand.
+# MAGIC Loops over every calibrated batch. For a one-off setup we render all batches inline; for
+# MAGIC bigger backfills run `jobs/render_job.py` with `mode=coverage` per batch instead.
 
 # COMMAND ----------
 
@@ -153,15 +162,19 @@ for r in rows:
 # MAGIC %md
 # MAGIC ## 8. Deployment checklist
 # MAGIC
-# MAGIC 1. Upload `App/seattle-rf-digital-twin/` to the workspace.
-# MAGIC 2. Create the GPU job from `jobs/seattle_render_job.py` (g5.xlarge, DBR 16.4 + the deps
-# MAGIC    above). Put its `job_id` into `app.yaml` as `SEATTLE_RENDER_JOB_ID`.
-# MAGIC 3. Create the Databricks App `seattle-rf-digital-twin` pointing at the app dir; bind the
-# MAGIC    `rf-digital-twin-pg` Lakebase database (populates PGHOST/PGPORT/PGDATABASE/PGUSER).
-# MAGIC 4. Grant the app's service principal `CAN USE` on the Lakebase instance and `CAN MANAGE
-# MAGIC    RUN` on the render job.
-# MAGIC 5. Deploy. The app loads Downtown from cache instantly; picking another neighborhood
-# MAGIC    triggers the render job and the results auto-appear when the batches land.
+# MAGIC 1. Get `App/rf-digital-twin-lakebase/` into the workspace (a Git folder on this branch is
+# MAGIC    easiest — the app and the job then stay in sync automatically).
+# MAGIC 2. Create the GPU job from `jobs/render_job.py` (g5.xlarge, DBR 16.4 + the deps above,
+# MAGIC    plus `SEATTLE_SQL_WAREHOUSE_ID` and `PG_SCHEMA` as spark env vars). Put its `job_id`
+# MAGIC    into `app.yaml` as `SIONNA_RENDER_JOB_ID`.
+# MAGIC 3. Create the Databricks App pointing at the app dir; bind the `rf-digital-twin-pg`
+# MAGIC    Lakebase database (populates PGHOST/PGPORT/PGDATABASE/PGUSER).
+# MAGIC 4. Grant the app's service principal: `CAN MANAGE RUN` on the render job, `CAN_USE` on the
+# MAGIC    SQL warehouse, and `SELECT` on the tower table plus `USE_CATALOG`/`USE_SCHEMA` on its
+# MAGIC    parents. Without that last one the tower read 403s and **no config can be hashed**.
+# MAGIC 5. Run `tools/check_hash_parity.py`. Every preset must resolve to a cached render.
+# MAGIC 6. Deploy. Presets load from cache instantly; any off-menu config triggers the render job
+# MAGIC    and appears automatically when it lands.
 
 # COMMAND ----------
 
