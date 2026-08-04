@@ -16,6 +16,7 @@ Two render modes, both writing PNG+KPI rows into Lakebase keyed by config_hash:
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import neighborhoods as nb
@@ -23,36 +24,17 @@ import tiling
 import towers
 import defaults
 import lakebase_client as lb
+import scene_spec
 from sionna_compute import run_simulation
 
-# Per-tile tower cap (keeps a single solve within A10G memory) and tile geometry.
-TOWER_CAP = 30
-TILE_SIZE_M = 800.0
-TILE_MARGIN_M = 150.0
+# Tile geometry and the per-tile tower cap live in scene_spec, so the app hashes against the
+# exact same values this pipeline renders with. Re-exported here for existing call sites.
+TOWER_CAP = scene_spec.TOWER_CAP
+TILE_SIZE_M = scene_spec.TILE_SIZE_M
+TILE_MARGIN_M = scene_spec.TILE_MARGIN_M
 
-
-def _scene_cfg(story: defaults.SeattleStory, hood: nb.Neighborhood,
-               tile: "tiling.Tile") -> Dict[str, Any]:
-    """Assemble the scene config dict run_simulation + lakebase expect for one render."""
-    cfg = story.to_dict()
-    cfg.update(
-        use_osm=True,
-        origin_lat=hood.center_lat,
-        origin_lon=hood.center_lon,
-        render_bounds=list(tile.render_bounds),
-        tile_id=tile.tile_id,
-        osm_scene_dir="/tmp/seattle_osm_scenes",
-    )
-    return cfg
-
-
-def _core_tile(neighborhood: str, cells: List[dict]) -> Tuple["tiling.Tile", List[dict]]:
-    """The tile owning the most towers — the gallery renders all stories here."""
-    tiles = tiling.make_tiles(neighborhood, TILE_SIZE_M, TILE_MARGIN_M)
-    assigned = tiling.assign_towers(tiles, cells, TOWER_CAP)
-    if not assigned:
-        raise RuntimeError(f"No towers found for neighborhood {neighborhood!r}")
-    return max(assigned, key=lambda tc: len(tc[1]))
+_scene_cfg = scene_spec.scene_cfg
+_core_tile = scene_spec.core_tile
 
 
 def render_stories(spark, neighborhood: str = "Downtown", seed: int = 1234,
@@ -146,6 +128,43 @@ def render_coverage(spark, neighborhood: str, batch_index: int = 0, n_batches: i
     lb.upsert_neighborhood(neighborhood, status="CACHED" if final else "RENDERING",
                            n_towers=len(cells))
     return summary
+
+
+def render_custom(scene_json: str, expect_hash: str, seed: int = scene_spec.DEFAULT_SEED) -> dict:
+    """Render one off-menu config the app requested, and cache it under ``expect_hash``.
+
+    The app sends only the **knobs** (a ``SeattleStory``-shaped dict), never the towers — this
+    rebuilds those from the neighborhood via ``scene_spec.resolve``, exactly as the app did
+    when it computed the hash it's now polling for.
+
+    The hash assertion is the guardrail: if app-side and job-side resolution ever drift, this
+    fails loudly here instead of silently writing a cache row the app will never read.
+    """
+    story = defaults.story_from_dict(json.loads(scene_json))
+    cfg, cells, tile = scene_spec.resolve(story.neighborhood, story, seed=seed)
+    config_hash = lb.compute_config_hash(cfg, cells)
+    if config_hash != expect_hash:
+        raise RuntimeError(
+            f"Hash mismatch — the app asked for {expect_hash} but job-side resolution of the "
+            f"same config produced {config_hash}. App and job disagree about the tower set or "
+            f"tile; rendering would cache a row the app can never read."
+        )
+
+    lb.upsert_scene_config(cfg, cells, is_preset=False)
+    lb.set_job_status(config_hash, "RUNNING")
+    print(f"[custom] {story.neighborhood} tile {tile.tile_id}: {len(cells)} towers, "
+          f"hash {config_hash[:12]} …")
+    try:
+        results = run_simulation(cfg, cells)
+        lb.write_render(config_hash, results)
+        lb.set_job_status(config_hash, "SUCCEEDED")
+    except Exception as e:
+        lb.set_job_status(config_hash, "FAILED", error_message=f"{type(e).__name__}: {e}")
+        raise
+    print(f"    done in {results['compute_seconds']:.1f}s.")
+    return {"name": story.name, "hash": config_hash, "tile": tile.tile_id,
+            "n_towers": len(cells), "seconds": results["compute_seconds"],
+            "status": "rendered"}
 
 
 def calibrate(spark, neighborhood: str = "Downtown", target_min: float = 25.0) -> dict:

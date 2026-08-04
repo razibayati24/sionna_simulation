@@ -111,6 +111,21 @@ STORIES: dict[str, SeattleStory] = {
 # Config the on-demand neighborhood dropdown renders (one coverage pass per tile).
 NEIGHBORHOOD_DEFAULT_STORY = S1_BASELINE
 
+# story_key the app stamps on an off-menu config assembled from the sidebar. It's part of the
+# hash, so a custom render can never collide with a preset's cache row.
+CUSTOM_STORY_KEY = "custom"
+
+_STORY_FIELDS = frozenset(SeattleStory.__dataclass_fields__)
+
+
+def story_from_dict(d: dict) -> SeattleStory:
+    """Rebuild a story from a knobs dict, ignoring keys that aren't story fields.
+
+    Round-trips ``SeattleStory.to_dict()``, and also accepts a full scene_cfg (which carries
+    extra render keys like ``render_bounds`` / ``tile_id`` that the tile decides, not the user).
+    """
+    return SeattleStory(**{k: v for k, v in d.items() if k in _STORY_FIELDS})
+
 
 def apply_story_to_cells(story: SeattleStory, cells: List[dict]) -> List[dict]:
     """Filter + power-override a tower list for a story; re-index cell_id contiguously."""

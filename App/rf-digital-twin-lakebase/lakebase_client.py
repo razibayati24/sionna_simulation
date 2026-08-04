@@ -29,9 +29,10 @@ import psycopg
 from psycopg.rows import dict_row
 
 _DEFAULT_INSTANCE_NAME = "rf-digital-twin-pg"
-# Seattle tables live in their own Postgres schema so they never collide with the etoile
-# demo's tables in the shared rf_digital_twin database (override via PG_SCHEMA).
-_PG_SCHEMA = os.environ.get("PG_SCHEMA", "seattle")
+# This app's tables live in their own Postgres schema inside the shared rf_digital_twin
+# database, so they never collide with the other demos on the same instance (override via
+# PG_SCHEMA).
+_PG_SCHEMA = os.environ.get("PG_SCHEMA", "lakebase_only")
 _TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
 _TOKEN_TTL_SECONDS = 45 * 60
 _INSTANCE_CACHE: dict[str, Any] = {"host": None, "name": None}
@@ -89,7 +90,7 @@ def _conn_kwargs() -> dict:
         sslmode=_pick("PGSSLMODE", "LAKEBASE_SSLMODE", default="require"),
         # Fail fast instead of hanging forever when the DB endpoint is unreachable.
         connect_timeout=int(_pick("PGCONNECT_TIMEOUT", default="10")),
-        # Resolve all unqualified table names to the Seattle schema (created by init_schema).
+        # Resolve all unqualified table names to this app's schema (created by init_schema).
         options=f"-c search_path={_PG_SCHEMA},public",
     )
 
@@ -229,15 +230,38 @@ _HASH_CELL_FIELDS = (
 )
 
 
+# Decimal places floats are quantized to before hashing. Tower coordinates are metres, so 6 dp
+# is sub-micron — far below anything the ray tracer can resolve — while making the hash
+# immune to last-ULP float noise.
+#
+# This matters because the app and the render job run on different platforms (an app container
+# on Linux x86_64 vs a dev laptop on macOS arm64), and libm's ``cos`` for the projection in
+# ``neighborhoods.project_lonlat`` differs between them by 1 ULP. Hashing raw ``repr`` floats
+# made every preset a cache miss depending on which machine did the hashing. ``round`` is
+# correctly-rounded and platform-independent in CPython, so quantizing first fixes it.
+_HASH_FLOAT_DP = 6
+
+
+def _quantize(v: Any) -> Any:
+    """Round floats to _HASH_FLOAT_DP so the hash can't depend on last-bit float noise."""
+    if isinstance(v, float):
+        # Normalise -0.0 to 0.0 too; they're equal but repr differently.
+        return round(v, _HASH_FLOAT_DP) + 0.0
+    return v
+
+
 def compute_config_hash(scene: dict, cells: Iterable[dict]) -> str:
-    """Deterministic hash over scene + ordered cells + neighborhood/tile identity."""
+    """Deterministic hash over scene + ordered cells + neighborhood/tile identity.
+
+    Stable across platforms: see ``_HASH_FLOAT_DP``.
+    """
     payload = {
         "neighborhood": scene.get("neighborhood"),
         "tile_id": scene.get("tile_id"),
         "story_key": scene.get("story_key"),
-        "scene": {k: scene[k] for k in _HASH_SCENE_FIELDS},
+        "scene": {k: _quantize(scene[k]) for k in _HASH_SCENE_FIELDS},
         "cells": [
-            {k: c.get(k) for k in _HASH_CELL_FIELDS}
+            {k: _quantize(c.get(k)) for k in _HASH_CELL_FIELDS}
             for c in sorted(cells, key=lambda c: c["cell_id"])
         ],
     }
