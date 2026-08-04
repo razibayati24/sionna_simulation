@@ -1,0 +1,37 @@
+command: [
+  "shiny",
+  "run",
+  # No --reload: it kills the Shiny session websocket in Databricks Apps, which leaves
+  # every panel blank.
+  "--host", "0.0.0.0",
+  "--port", "8000",
+  "app.py:app"
+]
+
+env:
+  # Lakebase instance the app mints OAuth tokens for at runtime.
+  - name: "LAKEBASE_INSTANCE"
+    value: "rf-digital-twin-pg"
+
+  # GPU job that renders an uncached config on demand. Set after creating the job from
+  # jobs/render_job.py.
+  - name: "SIONNA_RENDER_JOB_ID"
+    value: ""
+
+  # SQL warehouse used to read the geospatial tower table (a geometry column blocks Spark,
+  # and the app has no Spark anyway). Leave unset to auto-pick a running serverless warehouse.
+  - name: "SEATTLE_SQL_WAREHOUSE_ID"
+    value: "7b65956f30d66feb"
+
+  # Workspace host — used to build clickable links into the Jobs UI for in-progress runs.
+  - name: "DATABRICKS_WORKSPACE_URL"
+    value: "https://fevm-cmegdemos.cloud.databricks.com"
+
+# Resource bindings + grants the app service principal needs:
+#   1. Lakebase database  → instance: rf-digital-twin-pg, database: rf_digital_twin
+#      Populates PGHOST / PGPORT / PGDATABASE / PGUSER (PGPASSWORD is minted at runtime
+#      via the Databricks SDK OAuth token).
+#   2. CAN MANAGE RUN on the render job, so a cache miss can trigger a render.
+#   3. CAN_USE on the SQL warehouse above.
+#   4. SELECT on cmegdemos_catalog.network_analytics_enablement.cell_towers — without it
+#      the tower load 403s and no config can be hashed.

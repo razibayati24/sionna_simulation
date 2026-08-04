@@ -87,6 +87,8 @@ def _conn_kwargs() -> dict:
         dbname=_pick("PGDATABASE", "LAKEBASE_DATABASE", default="rf_digital_twin"),
         user=user, password=password,
         sslmode=_pick("PGSSLMODE", "LAKEBASE_SSLMODE", default="require"),
+        # Fail fast instead of hanging forever when the DB endpoint is unreachable.
+        connect_timeout=int(_pick("PGCONNECT_TIMEOUT", default="10")),
         # Resolve all unqualified table names to the Seattle schema (created by init_schema).
         options=f"-c search_path={_PG_SCHEMA},public",
     )

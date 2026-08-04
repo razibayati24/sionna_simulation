@@ -3,3 +3,11 @@
 
 __pycache__/
 *.pyc
+
+.DS_Store
+.claude/
+
+# Local scratch apps — not part of this branch's story, and the tower-map
+# diagnostics dumps contain live tokens.
+App/tower-map-app/
+App/sionna-rt-gui-remote/
