@@ -140,15 +140,22 @@ def render_custom(scene_json: str, expect_hash: str, seed: int = scene_spec.DEFA
     The hash assertion is the guardrail: if app-side and job-side resolution ever drift, this
     fails loudly here instead of silently writing a cache row the app will never read.
     """
-    story = defaults.story_from_dict(json.loads(scene_json))
-    cfg, cells, tile = scene_spec.resolve(story.neighborhood, story, seed=seed)
-    config_hash = lb.compute_config_hash(cfg, cells)
-    if config_hash != expect_hash:
-        raise RuntimeError(
-            f"Hash mismatch — the app asked for {expect_hash} but job-side resolution of the "
-            f"same config produced {config_hash}. App and job disagree about the tower set or "
-            f"tile; rendering would cache a row the app can never read."
-        )
+    # Anything that goes wrong before the render is recorded against expect_hash — that's the
+    # hash the app is polling, and without a FAILED row there it would poll until the user
+    # gives up rather than being told what happened.
+    try:
+        story = defaults.story_from_dict(json.loads(scene_json))
+        cfg, cells, tile = scene_spec.resolve(story.neighborhood, story, seed=seed)
+        config_hash = lb.compute_config_hash(cfg, cells)
+        if config_hash != expect_hash:
+            raise RuntimeError(
+                f"Hash mismatch — the app asked for {expect_hash} but job-side resolution of "
+                f"the same config produced {config_hash}. App and job disagree about the tower "
+                f"set or tile; rendering would cache a row the app can never read."
+            )
+    except Exception as e:
+        lb.set_job_status(expect_hash, "FAILED", error_message=f"{type(e).__name__}: {e}")
+        raise
 
     lb.upsert_scene_config(cfg, cells, is_preset=False)
     lb.set_job_status(config_hash, "RUNNING")

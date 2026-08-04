@@ -92,9 +92,12 @@ App/rf-digital-twin-lakebase/
 > `mapbox_earcut`) belong to the **setup notebook and render job**, not the app — the app process
 > only reads Lakebase and the tower table, so its `requirements.txt` stays light.
 > `mapbox_earcut` is the triangulation backend `trimesh` needs to extrude building footprints;
-> without it every building silently drops to the flat-ground fallback. Install it via the
-> notebook's `%pip` cell only — as a *cluster* library it drags in numpy 2 and breaks DBR 16.4's
-> numpy 1 ABI, killing the run at `Failure starting repl` before any code executes.
+> without it every building silently drops to the flat-ground fallback.
+>
+> Both notebooks `%pip`-install that set with a `numpy<2` pin and then `restartPython()`. Give the
+> job **no cluster libraries at all**: those install before the Python kernel starts, several of
+> them resolve numpy 2, and DBR 16.4 ships numpy 1 — the run then dies at `Failure starting repl`
+> (`numpy.dtype size changed, Expected 96 ... got 88`) before any code runs.
 
 ## Deploy
 

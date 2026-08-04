@@ -29,8 +29,13 @@
 # COMMAND ----------
 
 # MAGIC %pip install --quiet --upgrade drjit mitsuba sionna-rt \
-# MAGIC   "psycopg[binary]>=3.1.18" "databricks-sdk>=0.55.0" requests shapely trimesh mapbox_earcut
+# MAGIC   "psycopg[binary]>=3.1.18" "databricks-sdk>=0.55.0" requests shapely trimesh \
+# MAGIC   mapbox_earcut "numpy<2"
 # MAGIC dbutils.library.restartPython()
+#
+# Keep numpy pinned below 2 and install here rather than as cluster libraries: DBR 16.4 ships
+# numpy 1, and a cluster-library install of these deps pulls numpy 2 in before the Python
+# kernel starts, killing the run at "Failure starting repl".
 
 # COMMAND ----------
 

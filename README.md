@@ -298,23 +298,23 @@ renders S1–S7 into the cache. It's idempotent — re-running only renders what
 
 ```
 single node · g5.xlarge driver · DBR 16.4.x-scala2.13 · SINGLE_USER
-libraries: drjit mitsuba sionna-rt psycopg[binary]>=3.1.18 databricks-sdk>=0.55.0
-           requests shapely trimesh
+libraries: none — the notebook %pip-installs its own (see below)
 spark_env_vars: SEATTLE_SQL_WAREHOUSE_ID=<warehouse id>   PG_SCHEMA=<your schema>
 ```
 
 Internet egress is required (Overpass API).
 
-Two library gotchas, both learned the hard way:
+**Attach no job/cluster libraries.** The notebook's first cell installs
+`drjit mitsuba sionna-rt psycopg[binary] databricks-sdk requests shapely trimesh mapbox_earcut`
+plus a `numpy<2` pin, then calls `restartPython()`. That ordering is load-bearing: cluster
+libraries are installed *before* the Python kernel starts, and several of these resolve numpy 2,
+which breaks DBR 16.4's numpy-1 ABI. The run then dies at `Failure starting repl` with
+`numpy.dtype size changed, Expected 96 from C header, got 88` before executing a single line —
+a failure that looks like a cluster problem and isn't. Installed from `%pip` after the kernel is
+up, the pin holds.
 
-- **`mapbox_earcut` must be installed by the notebook's `%pip` cell, not as a cluster library.**
-  It's not optional — without it trimesh can't triangulate building footprints and the OSM
-  buildings silently vanish. But as a *cluster* library it resolves numpy 2, which breaks DBR
-  16.4's numpy 1 ABI before the notebook even starts: the run dies with
-  `Failure starting repl` and `numpy.dtype size changed, Expected 96 from C header, got 88`.
-  The `%pip` cell installs it after the kernel is up, where it's harmless.
-- Keep that `%pip` line in sync with this library list — the notebook re-installs the same set so
-  it also runs standalone on an interactive cluster.
+`mapbox_earcut` in particular isn't optional: without it trimesh can't triangulate building
+footprints and the OSM buildings silently vanish from the scene.
 
 **3. Create the app** pointing at `App/rf-digital-twin-lakebase`, and set `SIONNA_RENDER_JOB_ID` in
 `app.yaml` to the job you just made.

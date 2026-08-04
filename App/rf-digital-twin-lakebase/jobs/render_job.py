@@ -34,8 +34,14 @@
 # COMMAND ----------
 
 # MAGIC %pip install --quiet drjit mitsuba sionna-rt "psycopg[binary]>=3.1.18" \
-# MAGIC   "databricks-sdk>=0.55.0" requests shapely trimesh mapbox_earcut
+# MAGIC   "databricks-sdk>=0.55.0" requests shapely trimesh mapbox_earcut "numpy<2"
 # MAGIC dbutils.library.restartPython()
+#
+# Install these here, NOT as job/cluster libraries. Cluster libraries are installed before the
+# Python kernel starts, and several of these resolve numpy 2, which breaks DBR 16.4's numpy-1
+# ABI — the run then dies at "Failure starting repl" with "numpy.dtype size changed, Expected
+# 96 from C header, got 88" before a single line of this notebook executes. Installed here,
+# after the kernel is up, the pin holds and restartPython() picks it all up cleanly.
 
 # COMMAND ----------
 
